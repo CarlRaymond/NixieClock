@@ -7,29 +7,35 @@
 
 // Pin map
 //
-// Nixie DIN:		11
-// SRCK:			13
-// RCK:				8
-// Nixie /EN:		3
-// Pixel DIN:		6
-// 60Hz heartbeat:	2
+// Nixie DIN (out):			11
+// SRCK (out):				13
+// RCK (out):				8
+// Nixie /EN (out):			3
+// Pixel DIN (out):			6
+// HV /EN (out):			5
+
+// WWVB Data (in):			7
+// 60Hz heartbeat (out):	2
 
 // Heartbeat indicator
-const int HEARTBEAT_PIN = 2; // PORTD bit 2
+const int PIN_HEARTBEAT = 2; // PORTD bit 2
+
+const int PIN_PWM = 3;
+
+const int PIN_HV = 5;
+
 // Ring serial output
-const int RING_PIN = 6;
+const int PIN_PIXEL = 6;
+
 // SYMTRIK input pin
-const int WWVB_PIN = 7;
+const int PIN_WWVB = 7;
+
+const int PIN_RCK = 8;
 
 // SPI pins
-const int PIN_RCK = 8;
-const int PIN_PWM = 3;
-const int PIN_SS = 10;
 const int PIN_MOSI = 11;
 const int PIN_MISO = 12;
 const int PIN_SCK = 13;
-
-uint8_t tubePwm = 255;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count heartbeat_short_periods (out of
@@ -54,7 +60,7 @@ volatile uint8_t heartbeat_period = 0;
 volatile uint8_t pixelIndex = 0;
 
 // First 60 pixels are the ring; the final 10 are the on-board pixels
-Adafruit_NeoPixel ring = Adafruit_NeoPixel(70, RING_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ring = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
 const uint32_t OFF = 0L;
 const uint32_t ORANGE = ring.Color(6, 1, 0);
@@ -76,20 +82,23 @@ void setup() {
 
 	// Configure PWM
 	pinMode(PIN_PWM, OUTPUT);
-	configure_pwm();
+
+	pinMode(PIN_HV, OUTPUT);
+	digitalWrite(PIN_HV, LOW);
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
 
-	pinMode(RING_PIN, OUTPUT);
-	pinMode(WWVB_PIN, INPUT);
-	pinMode(HEARTBEAT_PIN, OUTPUT);
+	pinMode(PIN_PIXEL, OUTPUT);
+	pinMode(PIN_WWVB, INPUT);
+	pinMode(PIN_HEARTBEAT, OUTPUT);
 
+	configure_pwm();
 	configure_heartbeat();
 
 	ring.begin();
 
-	// Backlight
+	// Backlight rainbow
 	ring.setPixelColor(60, ring.Color(255,0,0));
 	ring.setPixelColor(61, ring.Color(255,50,0));
 	ring.setPixelColor(64, ring.Color(255,150,0));
@@ -98,14 +107,14 @@ void setup() {
 	ring.setPixelColor(69, ring.Color(128,0,128));
 
 	// Colons
-	ring.setPixelColor(62, ring.Color(90, 0, 16));
-	ring.setPixelColor(63, ring.Color(90, 0, 16));
-	ring.setPixelColor(66, ring.Color(90, 0, 16));
-	ring.setPixelColor(67, ring.Color(90, 0, 16));
+	ring.setPixelColor(62, ring.Color(60, 0, 10));
+	ring.setPixelColor(63, ring.Color(60, 0, 10));
+	ring.setPixelColor(66, ring.Color(60, 0, 10));
+	ring.setPixelColor(67, ring.Color(60, 0, 10));
 
 	ring.show();
 
-	setTubePwm(200);
+	setTubePwm(100);
 	Serial.begin(115200);
 }
 
@@ -130,7 +139,7 @@ void heartbeat() {
 	PORTD |= B00000100;
 
 	// Sample the input
-	bool input = digitalRead(WWVB_PIN);
+	bool input = digitalRead(PIN_WWVB);
 	
 	if (input) {
 	  ring.setPixelColor(pixelIndex, ORANGE);
@@ -149,6 +158,11 @@ void heartbeat() {
 
 	// Set heartbeat pin low
 	PORTD &= B11111011;
+}
+
+// Increment the time of day
+void tick() {
+
 }
 
 void updateNixies() {
