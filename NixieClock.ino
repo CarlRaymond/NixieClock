@@ -5,6 +5,15 @@
 #endif
 
 
+// Pin map
+//
+// Nixie DIN:		11
+// SRCK:			13
+// RCK:				8
+// Nixie /EN:		3
+// Pixel DIN:		6
+// 60Hz heartbeat:	2
+
 // Heartbeat indicator
 const int HEARTBEAT_PIN = 2; // PORTD bit 2
 // Ring serial output
@@ -14,14 +23,13 @@ const int WWVB_PIN = 7;
 
 // SPI pins
 const int PIN_RCK = 8;
-const int PIN_PWM = 9;
+const int PIN_PWM = 3;
 const int PIN_SS = 10;
 const int PIN_MOSI = 11;
 const int PIN_MISO = 12;
 const int PIN_SCK = 13;
 
-int value = 0;
-int pwm = 0;
+uint8_t tubePwm = 255;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count heartbeat_short_periods (out of
@@ -66,9 +74,10 @@ void setup() {
 	// Configure SPI pins
 	SPI.begin();
 
-	// Configure PWM, register clock
+	// Configure PWM
 	pinMode(PIN_PWM, OUTPUT);
-	analogWrite(PIN_PWM, pwm);
+	configure_pwm();
+
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
 
@@ -78,20 +87,11 @@ void setup() {
 
 	configure_heartbeat();
 
-	nixieData[5] = 0;
-	nixieData[4] = B10000010;
-	nixieData[3] = B00000000;
-	nixieData[2] = B00000100;
-	nixieData[1] = B00010001;
-	nixieData[0] = B00100000;
-
-	updateNixies();	
-
 	ring.begin();
 
 	// Backlight
 	ring.setPixelColor(60, ring.Color(255,0,0));
-	ring.setPixelColor(61, ring.Color(255,60,0));
+	ring.setPixelColor(61, ring.Color(255,50,0));
 	ring.setPixelColor(64, ring.Color(255,150,0));
 	ring.setPixelColor(65, ring.Color(0,255,0));
 	ring.setPixelColor(68, ring.Color(0,0,255));
@@ -103,14 +103,24 @@ void setup() {
 	ring.setPixelColor(66, ring.Color(90, 0, 16));
 	ring.setPixelColor(67, ring.Color(90, 0, 16));
 
-
 	ring.show();
 
-	//nixieData[0] = B0000100;
-	//updateNixies();
-
+	setTubePwm(200);
 	Serial.begin(115200);
-	Serial.print("Whazzup!\n");
+}
+
+
+void loop() {
+
+	for (int hour=1;  hour<24;  hour++) {
+		setHours(hour);
+		for (int sec=0;  sec<60;  sec++) {
+			setSeconds(sec);
+			setMinutes(59 - sec);
+			updateNixies();
+			delay(25);
+		}
+	}
 }
 
 // Invoked at 60Hz.
@@ -119,6 +129,7 @@ void heartbeat() {
 	// Set heartbeat pin high
 	PORTD |= B00000100;
 
+	// Sample the input
 	bool input = digitalRead(WWVB_PIN);
 	
 	if (input) {
@@ -140,17 +151,6 @@ void heartbeat() {
 	PORTD &= B11111011;
 }
 
-
-
-void loop() {
-
-//for (int sec=0;  sec<=60;  sec++) {
-//		setSeconds(sec);
-//		updateNixies();
-//		delay(100);
-//	}
-}
-
 void updateNixies() {
 	digitalWrite(PIN_RCK, LOW);
 	SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
@@ -167,44 +167,99 @@ void resetNixies() {
 	}
 }
 
-void sendData() {
-	for (int i=0; i<6; i++) {
-		Serial.print(nixieData[i]);
-		Serial.write(' ');
-	}
-	Serial.write('\n');
-}
-
+// Set the value displayed on the seconds digits. No range check performed.
+// 0 <= value <= 60
 void setSeconds(int value) {
 	int units;
 	int tens;
 
+	// Blank all seconds segments
+	nixieData[5] = 0;
+	nixieData[4] = 0;
+	nixieData[3] &= B11111110;
+
     tens = value / 10;
 	units = value % 10;
-	Serial.print(tens);
-	Serial.print(' ');
-	Serial.print(units);
-	Serial.print('\n');
-
-	nixieData[0] = 0;
-	nixieData[1] = 0;
-	nixieData[2] &= B11111110;
 
 	if (units < 8) {
-		nixieData[0] = (1 << units);
+		nixieData[5] = (1 << units);
 	}
 	else {
-		nixieData[1] |= (1 << (units-8));
+		nixieData[4] |= (1 << (units-8));
 	}
 
 	if (tens < 6) {
-		nixieData[1] |= (1 << (tens+2));
+		nixieData[4] |= (1 << (tens+2));
 	}
 	else {
-		nixieData[2] |= B00000001;
+		nixieData[3] |= B00000001;
 	}
 }
 
+// Set the value displayed on the minutes digits. No range check performed.
+// 0 <= value <= 59
+void setMinutes(int value) {
+	int units;
+	int tens;
+
+	// Blank all minutes segments
+	nixieData[3] &= B00000001;
+	nixieData[2] = 0;
+	nixieData[1] &= B11111110;
+
+	tens = value / 10;
+	units = value % 10;
+
+	if (units < 7) {
+		nixieData[3] |= (1 << (units+1));
+	}
+	else {
+		nixieData[2] |= (1 << (units-7));
+	}
+
+	if (tens < 5) {
+		nixieData[2] |= (1 << (tens+3));
+	}
+	else {
+		nixieData[1] |= 1;
+	}
+}
+
+// Set the value displayed on the hours digits. No range check performed.
+// 0 <= value <= 23
+void setHours(int value) {
+	int tens = value / 10;
+	int units = value % 10;
+
+	// Blank all hours segments
+	nixieData[1] &= B00000001;
+	nixieData[0] = 0;
+
+	if (units < 7) {
+		nixieData[1] |= (1 << (units+1));
+	}
+	else {
+		nixieData[0] |= (1 << (units-7));
+	}
+
+	// Suppress leading zero
+	if (tens > 0) {
+		nixieData[0] |= (1 << (tens+3));
+	}
+}
+
+void setTubePwm(uint8_t value) {
+	OCR2B = value;
+}
+
+void configure_pwm() {
+	// Configure timer 2 for PWM at 244Hz
+
+	// Arduino pin 3 is OC2B
+	TCCR2A = _BV(COM2B1) | _BV(COM2B0) | _BV(WGM21) | _BV(WGM20);
+ 	TCCR2B = _BV(CS22) | _BV(CS21);
+	OCR2B = 255;
+}
 void configure_heartbeat() {
 
 	// Configure timer 1 to interrupt at 60Hz
