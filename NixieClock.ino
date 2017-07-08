@@ -28,7 +28,7 @@ const int PIN_HV = 5;
 const int PIN_PIXEL = 6;
 
 // SYMTRIK input pin
-const int PIN_WWVB = 7;
+const int PIN_WWVB = 7; // PORTD bit 7
 
 const int PIN_RCK = 8;
 
@@ -64,7 +64,7 @@ Adafruit_NeoPixel ring = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
 const uint32_t OFF = 0L;
 const uint32_t ORANGE = ring.Color(6, 1, 0);
-const uint32_t GREEN = ring.Color(3, 10, 2);
+const uint32_t GREEN = ring.Color(3, 50, 2);
 const uint32_t PURPLE = ring.Color(5, 1, 8);
 const uint32_t BLUE = ring.Color(4, 4, 20);
 
@@ -75,6 +75,23 @@ const uint32_t BLUE = ring.Color(4, 4, 20);
 // Six bytes of data for nixies
 uint8_t nixieData[6];
 
+// 72-bit long shift register for input samples. Little endian.
+// Offset 0, bit 0 has most recent sample bit; offset 8 bit 7
+// has oldest sample bit. Shifts left. 
+uint8_t samples[9];
+
+// Correlation template for a zero bit. From oldest to newest:
+// 12 0s, 12 1s, 48 0s
+uint8_t WWVB_ZERO[9] = { 0x00, 0x0F, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+// Correlaton template for one bit. From oldest to newest:
+// 12 0s, 30 1s, 30 0s
+uint8_t WWVB_ONE[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, 0x00, 0x00 };
+
+// Correlation template for frame bit. From oldest to newest:
+// 12 0s, 48 1s, 12 0s
+uint8_t WWVB_FRAME[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0x00 };
+
 void setup() {
 
 	// Configure SPI pins
@@ -84,7 +101,7 @@ void setup() {
 	pinMode(PIN_PWM, OUTPUT);
 
 	pinMode(PIN_HV, OUTPUT);
-	digitalWrite(PIN_HV, LOW);
+	digitalWrite(PIN_HV, LOW); // HV on
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
@@ -93,8 +110,8 @@ void setup() {
 	pinMode(PIN_WWVB, INPUT);
 	pinMode(PIN_HEARTBEAT, OUTPUT);
 
-	configure_pwm();
-	configure_heartbeat();
+	configurePwm();
+	configureHeartbeat();
 
 	ring.begin();
 
@@ -114,8 +131,8 @@ void setup() {
 
 	ring.show();
 
-	setTubePwm(100);
-	Serial.begin(115200);
+	setTubePwm(145);
+	//Serial.begin(115200);
 }
 
 
@@ -127,7 +144,7 @@ void loop() {
 			setSeconds(sec);
 			setMinutes(59 - sec);
 			updateNixies();
-			delay(25);
+			delay(17);
 		}
 	}
 }
@@ -138,8 +155,10 @@ void heartbeat() {
 	// Set heartbeat pin high
 	PORTD |= B00000100;
 
-	// Sample the input
-	bool input = digitalRead(PIN_WWVB);
+	// Sample the input - port D bit 7
+	//bool input = (PORTD & B00000001) >> 7;
+	uint8_t input = digitalRead(PIN_WWVB);
+	shiftSample(input);
 	
 	if (input) {
 	  ring.setPixelColor(pixelIndex, ORANGE);
@@ -158,6 +177,23 @@ void heartbeat() {
 
 	// Set heartbeat pin low
 	PORTD &= B11111011;
+}
+
+// Shifts in a new bit sample into the array. The new bit is the LSB of the value
+void shiftSample(uint8_t value) {
+
+	// Shift LSB of value into C flag
+	asm volatile(
+		"lsr %0 \n\t" : "=r" (value) : "0" (value) 
+	);
+
+	// Shift sample array left one bit
+	asm volatile(
+		"ldi %A0, lo8(samples) \n\t"
+		"ldi %B0, hi8(samples) \n\t"
+		"ld __tmp_reg__, %a0 \n\t"
+		: "=e" (samples) : 
+	);
 }
 
 // Increment the time of day
@@ -266,7 +302,7 @@ void setTubePwm(uint8_t value) {
 	OCR2B = value;
 }
 
-void configure_pwm() {
+void configurePwm() {
 	// Configure timer 2 for PWM at 244Hz
 
 	// Arduino pin 3 is OC2B
@@ -274,7 +310,7 @@ void configure_pwm() {
  	TCCR2B = _BV(CS22) | _BV(CS21);
 	OCR2B = 255;
 }
-void configure_heartbeat() {
+void configureHeartbeat() {
 
 	// Configure timer 1 to interrupt at 60Hz
  	OCR1A = heartbeat_cycles;
