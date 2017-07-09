@@ -41,7 +41,7 @@ const int PIN_SCK = 13;
 // "fractional PLL" technique.  Count heartbeat_short_periods (out of
 // heartbeat_total_periods) using heartbeat_cycles, and the remainder
 // using heartbeat_cycles+1.
-// For 60Hz, count two periods of 33,333 cycles and one
+// For 60Hz, count two periods of 33,333 cycles for each 
 // period of 33,334 cycles (with prescaler = 8, or 2,000,000Hz clock).
 
 // No. of cycles in a short period
@@ -59,18 +59,22 @@ volatile uint8_t heartbeat_period = 0;
 // Indicates the active pixel; updated at 60Hz by interrupt 
 volatile uint8_t pixelIndex = 0;
 
-// First 60 pixels are the ring; the final 10 are the on-board pixels
+// First 60 pixels are the ring; the final 10 are the on-board backlight pixels
 Adafruit_NeoPixel ring = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
 const uint32_t OFF = 0L;
-const uint32_t ORANGE = ring.Color(6, 1, 0);
-const uint32_t GREEN = ring.Color(3, 50, 2);
-const uint32_t PURPLE = ring.Color(5, 1, 8);
-const uint32_t BLUE = ring.Color(4, 4, 20);
+const uint32_t SAMPLE_ONE = ring.Color(6, 1, 0);
+const uint32_t SAMPLE_CURSOR = ring.Color(3, 50, 2);
+const uint32_t SAMPLE_ZERO = ring.Color(5, 1, 8);
 
-//const uint32_t ORANGE = ring.Color(6*25, 1*25, 0);
-//const uint32_t GREEN = ring.Color(3*25, 10*25, 2*25);
-//const uint32_t PURPLE = ring.Color(5*25, 1*25, 8*25);
+const uint32_t RED = ring.Color(255,0,0);
+const uint32_t ORANGE = ring.Color(255,50,0);
+const uint32_t YELLOW = ring.Color(255,150,0);
+const uint32_t GREEN = ring.Color(0,255,0);
+const uint32_t BLUE = ring.Color(0,0,255);
+const uint32_t PURPLE = ring.Color(128,0,128);
+const uint32_t PINK = ring.Color(60, 0, 10);
+const uint32_t FLASH = ring.Color(255, 128, 128);
 
 // Six bytes of data for nixies
 uint8_t nixieData[6];
@@ -94,6 +98,8 @@ uint8_t WWVB_ONE[9] = { 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0x0f, 0x00 };
 //uint8_t WWVB_FRAME[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0x00 };
 uint8_t WWVB_FRAME[9] = { 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00 };
 
+// Pattern matching threshold
+int scoreThreshold = 48;
 
 void setup() {
 
@@ -119,18 +125,18 @@ void setup() {
 	ring.begin();
 
 	// Backlight rainbow
-	ring.setPixelColor(60, ring.Color(255,0,0));
-	ring.setPixelColor(61, ring.Color(255,50,0));
-	ring.setPixelColor(64, ring.Color(255,150,0));
-	ring.setPixelColor(65, ring.Color(0,255,0));
-	ring.setPixelColor(68, ring.Color(0,0,255));
-	ring.setPixelColor(69, ring.Color(128,0,128));
+	ring.setPixelColor(60, RED);
+	ring.setPixelColor(61, ORANGE);
+	ring.setPixelColor(64, YELLOW);
+	ring.setPixelColor(65, GREEN);
+	ring.setPixelColor(68, BLUE);
+	ring.setPixelColor(69, PURPLE);
 
 	// Colons
-	ring.setPixelColor(62, ring.Color(60, 0, 10));
-	ring.setPixelColor(63, ring.Color(60, 0, 10));
-	ring.setPixelColor(66, ring.Color(60, 0, 10));
-	ring.setPixelColor(67, ring.Color(60, 0, 10));
+	ring.setPixelColor(62, PINK);
+	ring.setPixelColor(63, PINK);
+	ring.setPixelColor(66, PINK);
+	ring.setPixelColor(67, PINK);
 
 	ring.show();
 
@@ -197,34 +203,6 @@ void setup() {
 
 }
 
-int test_zero_on_zero() {
-	// Copy WWVB_ZERO to sample array
-	for (int i=0;  i<9;  i++) {
-		samples[i] = WWVB_ZERO[i];
-	}
-
-	return score(WWVB_ZERO);
-}
-
-int test_one_on_zero() {
-	// Copy WWVB_ONE to sample array
-	for (int i=0;  i<9;  i++) {
-		samples[i] = WWVB_ONE[i];
-	}
-
-	return score(WWVB_ZERO);
-	
-}
-
-int test_frame_on_zero() {
-	// Copy WWVB_FRAME to sample array
-	for (int i=0;  i<9;  i++) {
-		samples[i] = WWVB_FRAME[i];
-	}
-
-	return score(WWVB_ZERO);
-	
-}
 
 void loop() {
 
@@ -269,27 +247,84 @@ void heartbeat() {
 	//Serial.print(samples[0], BIN);
 	//Serial.print('\n');
 
-	//int score_zero = score(WWVB_ONE);
-	//Serial.print(score_zero);
-	//Serial.print('\n');
+	int score_frame = score(WWVB_FRAME);
+	int score_one = score(WWVB_ONE);
+	int score_zero = score(WWVB_ZERO);
+
+	flashZero(score_zero);
+	flashOne(score_one);
+	flashFrame(score_frame);
+
+	if (score_zero > scoreThreshold || score_one > scoreThreshold || score_frame > scoreThreshold) {
+		Serial.print(score_zero);
+		if (score_zero > scoreThreshold)
+			Serial.print("**  ");
+		else
+			Serial.print("    ");
+	
+		Serial.print(score_one);
+		if (score_one > scoreThreshold)
+			Serial.print("**  ");
+		else
+			Serial.print("    ");
+
+		Serial.print(score_frame);
+		if (score_frame > scoreThreshold)
+			Serial.print("**\n");
+		else
+			Serial.print("\n");
+	}
 
 	if (input) {
-	  ring.setPixelColor(pixelIndex, ORANGE);
+	  ring.setPixelColor(pixelIndex, SAMPLE_ONE);
 	}
 	else {
-		ring.setPixelColor(pixelIndex, PURPLE);
+		ring.setPixelColor(pixelIndex, SAMPLE_ZERO);
 	}
 
   	pixelIndex+=1;
  	if (pixelIndex >= 60) {
   		pixelIndex -= 60;
   	}
-	ring.setPixelColor(pixelIndex, GREEN);
+	ring.setPixelColor(pixelIndex, SAMPLE_CURSOR);
 
 	ring.show();
 
 	// Set heartbeat pin low
 	PORTD &= B11111011;
+}
+
+void flashZero(int score) {
+	if (score > scoreThreshold) {
+		ring.setPixelColor(68, FLASH);
+		ring.setPixelColor(69, FLASH);
+	}
+	else {
+		ring.setPixelColor(68, BLUE);
+		ring.setPixelColor(69, PURPLE);
+	}
+}
+
+void flashOne(int score) {
+	if (score > scoreThreshold) {
+		ring.setPixelColor(64, FLASH);
+		ring.setPixelColor(65, FLASH);
+	}
+	else {
+		ring.setPixelColor(64, YELLOW);
+		ring.setPixelColor(65, GREEN);
+	}
+}
+
+void flashFrame(int score) {
+	if (score > scoreThreshold) {
+		ring.setPixelColor(60, FLASH);
+		ring.setPixelColor(61, FLASH);
+	}
+	else {
+		ring.setPixelColor(60, RED);
+		ring.setPixelColor(61, ORANGE);
+	}
 }
 
 // Shifts in a new bit sample into the array. The new bit is the LSB of the value
@@ -312,6 +347,7 @@ void shiftSample(uint8_t value) {
 		//"ldi %A0, lo8(samples) \n\t"
 		//"ldi %B0, hi8(samples) \n\t"
 
+		// Unrolled loop to shift 9 bytes
 		"ld __tmp_reg__, %a0 \n\t"
 		"rol __tmp_reg__ \n\t"
 		"st %a0+, __tmp_reg__ \n\t"
