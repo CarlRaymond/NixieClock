@@ -78,19 +78,22 @@ uint8_t nixieData[6];
 // 72-bit long shift register for input samples. Little endian.
 // Offset 0, bit 0 has most recent sample bit; offset 8 bit 7
 // has oldest sample bit. Shifts left. 
-uint8_t samples[9];
+uint8_t volatile samples[9];
 
-// Correlation template for a zero bit. From oldest to newest:
-// 12 0s, 12 1s, 48 0s
-uint8_t WWVB_ZERO[9] = { 0x00, 0x0F, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
-// Correlaton template for one bit. From oldest to newest:
-// 12 0s, 30 1s, 30 0s
-uint8_t WWVB_ONE[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, 0x00, 0x00 };
-
-// Correlation template for frame bit. From oldest to newest:
+// Correlation template for a zero bit. From newest to oldest:
+// 48 0s, 12 1s, 12 0s.  Initialzing values start with LSB, which
+// is the most recent bit w.r.t sampled bit values, and progress to
+// the oldest bit.
+uint8_t WWVB_ZERO[9] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0f, 0x00};
+// Correlaton template for one bit. From newest to oldest:
+// 30 0s, 30 1s, 12 0s
+//uint8_t WWVB_ONE[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, 0x00, 0x00 };
+uint8_t WWVB_ONE[9] = { 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0x0f, 0x00 };
+// Correlation template for frame bit. From newest to oldest:
 // 12 0s, 48 1s, 12 0s
-uint8_t WWVB_FRAME[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0x00 };
+//uint8_t WWVB_FRAME[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0x00 };
+uint8_t WWVB_FRAME[9] = { 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00 };
+
 
 void setup() {
 
@@ -101,7 +104,7 @@ void setup() {
 	pinMode(PIN_PWM, OUTPUT);
 
 	pinMode(PIN_HV, OUTPUT);
-	digitalWrite(PIN_HV, LOW); // HV on
+	digitalWrite(PIN_HV, HIGH); // HV off
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
@@ -132,9 +135,96 @@ void setup() {
 	ring.show();
 
 	setTubePwm(145);
-	//Serial.begin(115200);
+	Serial.begin(230400);
+
+
+	Serial.print(WWVB_ZERO[8], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[7], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[6], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[5], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[4], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[3], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[2], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[1], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ZERO[0], BIN);
+	Serial.print('\n');
+
+	Serial.print(WWVB_ONE[8], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[7], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[6], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[5], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[4], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[3], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[2], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[1], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_ONE[0], BIN);
+	Serial.print('\n');
+
+	Serial.print(WWVB_FRAME[8], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[7], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[6], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[5], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[4], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[3], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[2], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[1], BIN);
+	Serial.print(' ');
+	Serial.print(WWVB_FRAME[0], BIN);
+	Serial.print('\n');
+
 }
 
+int test_zero_on_zero() {
+	// Copy WWVB_ZERO to sample array
+	for (int i=0;  i<9;  i++) {
+		samples[i] = WWVB_ZERO[i];
+	}
+
+	return score(WWVB_ZERO);
+}
+
+int test_one_on_zero() {
+	// Copy WWVB_ONE to sample array
+	for (int i=0;  i<9;  i++) {
+		samples[i] = WWVB_ONE[i];
+	}
+
+	return score(WWVB_ZERO);
+	
+}
+
+int test_frame_on_zero() {
+	// Copy WWVB_FRAME to sample array
+	for (int i=0;  i<9;  i++) {
+		samples[i] = WWVB_FRAME[i];
+	}
+
+	return score(WWVB_ZERO);
+	
+}
 
 void loop() {
 
@@ -159,7 +249,30 @@ void heartbeat() {
 	//bool input = (PORTD & B00000001) >> 7;
 	uint8_t input = digitalRead(PIN_WWVB);
 	shiftSample(input);
-	
+
+	//Serial.print(samples[8], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[7], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[6], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[5], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[4], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[3], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[2], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[1], BIN);
+	//Serial.print(' ');
+	//Serial.print(samples[0], BIN);
+	//Serial.print('\n');
+
+	//int score_zero = score(WWVB_ONE);
+	//Serial.print(score_zero);
+	//Serial.print('\n');
+
 	if (input) {
 	  ring.setPixelColor(pixelIndex, ORANGE);
 	}
@@ -189,11 +302,94 @@ void shiftSample(uint8_t value) {
 
 	// Shift sample array left one bit
 	asm volatile(
-		"ldi %A0, lo8(samples) \n\t"
-		"ldi %B0, hi8(samples) \n\t"
+
+		// The two lines below are auto-generated by the compiler as a result
+		// of the ' "e" (samples) ' constraint at the end of this asm block.
+		// The compiler will select a base register (X, Y or Z) to hold the address
+		// of 'samples', and the expression %a0 will be replaced with the selected
+		// base register.
+
+		//"ldi %A0, lo8(samples) \n\t"
+		//"ldi %B0, hi8(samples) \n\t"
+
 		"ld __tmp_reg__, %a0 \n\t"
-		: "=e" (samples) : 
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+
+		"ld __tmp_reg__, %a0 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a0+, __tmp_reg__ \n\t"
+		:  : "e" (samples)
 	);
+}
+
+
+// Array, indexed from 0..255, where each byte contains the number of 1 bits
+// in the corresponding index. Used by score function to sum the number of
+// matching bits in pattern comparisons.
+uint8_t parity[256] = {
+	0,	1,	1,	2,	1,	2,	2,	3,	1,	2,	2,	3,	2,	3,	3,	4,		// 0x00..0x0f
+	1,	2,	2,	3,	2,	3,	3,	4,	2,	3,	3,	4,	3,	4,	4,	5,		// 0x10..0x1f (+1)
+	1,	2,	2,	3,	2,	3,	3,	4,	2,	3,	3,	4,	3,	4,	4,	5,		// 0x20..0x2f (+1)
+	2,	3,	3,	4,	3,	4,	4,	5,	3,	4,	4,	5,	4,	5,	5,	6,		// 0x30..0x3f (+2)
+
+	1,	2,	2,	3,	2,	3,	3,	4,	2,	3,	3,	4,	3,	4,	4,	5,		// 0x40..0x4f (+1)
+	2,	3,	3,	4,	3,	4,	4,	5,	3,	4,	4,	5,	4,	5,	5,	6,		// 0x50..0x5f (+2)
+	2,	3,	3,	4,	3,	4,	4,	5,	3,	4,	4,	5,	4,	5,	5,	6,		// 0x60..0x6f (+2)
+	3,	4,	4,	5,	4,	5,	5,	6,	4,	5,	5,	6,	5,	6,	6,	7,		// 0x70..0x7f (+3)
+
+	1,	2,	2,	3,	2,	3,	3,	4,	2,	3,	3,	4,	3,	4,	4,	5,		// 0x80..0x8f (+1)
+	2,	3,	3,	4,	3,	4,	4,	5,	3,	4,	4,	5,	4,	5,	5,	6,		// 0x90..0x9f (+2)
+	2,	3,	3,	4,	3,	4,	4,	5,	3,	4,	4,	5,	4,	5,	5,	6,		// 0xa0..0xaf (+2)
+	3,	4,	4,	5,	4,	5,	5,	6,	4,	5,	5,	6,	5,	6,	6,	7,		// 0xb0..0xbf (+3)
+
+	2,	3,	3,	4,	3,	4,	4,	5,	3,	4,	4,	5,	4,	5,	5,	6,		// 0xc0..0xcf (+2)
+	3,	4,	4,	5,	4,	5,	5,	6,	4,	5,	5,	6,	5,	6,	6,	7,		// 0xd0..0xdf (+3)
+	3,	4,	4,	5,	4,	5,	5,	6,	4,	5,	5,	6,	5,	6,	6,	7,		// 0xe0..0xef (+3)
+	4,	5,	5,	6,	5,	6,	6,	7,	5,	6,	6,	7,	6,	7,	7,	8,		// 0xf0..0xff (+4)
+};
+
+
+// Score the sample array bits against the supplied pattern. Result
+// is number of matching bits between them.
+int score(uint8_t *pattern) {
+
+	int sum = 0;
+	for (int i=0; i<9; i++) {
+		// Compute matching bits: XOR pattern and samples, and complement
+		uint8_t bits = ~(samples[i] ^ pattern[i]);
+		sum += parity[bits];
+	}
+
+	return sum;
 }
 
 // Increment the time of day
