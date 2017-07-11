@@ -17,6 +17,58 @@
 // WWVB Data (in):			7
 // 60Hz heartbeat (out):	2
 
+
+// Theory of operation:
+// The WWVB bitstream consists of data bits which last one second each. A full word,
+// containing complete time-of-day (TOD) data, is 60 bits, taking one minute,
+// and is transmitted continuously. Each full frame gives the minute, hour, day, year
+// (and some status bits) as of the moment that frame began. The frame does not include
+// seconds; they are implcit. Second "0" is the first bit of the frame.
+//
+// There are three possible symbol patterns within the word that can be received: a logic
+// zero, a logic one, and a framing symbol that helps to determine begining and end of each
+// frame.
+// WWVB_ZERO: 0.2s (12 sample periods) high, 0.8s (48 sample periods) low
+// WWVB_ONE: 0.5s (30 sample periods) high, 0.5s (30 sample periods) low
+// WWVB_FRAME: 0.8s (48 sample periods) high, 0.2s (12 sample periods) low
+// 
+// The incoming bitstream is sampled at 60 Hz, and stored in a shift register.
+// Symbols are detected by comparing the stored samples with "perfect" templates of
+// the three possible symbols. A scoring function counts up the number of
+// matching bits, and on each bit shift compares the sampled data to the three templates.
+//
+// The shift register and matching patterns are 72 bits instead of only 60 to take advantage
+// of the fact that all three symbols end with at least 12 samples of low. The pattern templates
+// incorporate the 12 low samples (representing the tail end of the preceeding symbol) at their
+// head end, and then follow with the 60 samples representing the symbol.
+// While the additional 12 bits do not help to distinguish one symbol from another (since they
+// are the same for all symbols), they do help to distinguish a valid symbol from random
+// noise.
+// A match is detected when a symbols's score exceeds a threshold value. The threshold is below
+// the maximum score of 72 to account for both noise in the received signal, and inaccuracy
+// in the local sampling clock.
+//
+// This sample, shift, and score process happens continuously in the background, at 60Hz, and is
+// the first phase in decoding the bitstream. The second phase consists of watching the
+// constantly changing triples of symbol scores and, detecting when they reach a peak.
+// By the nature of the bit shifting, scores will follow a ramp pattern: as the incoming
+// bits for a symbols get closer to perfect alignment with the pattern, the score will
+// increase, reach a peak at perfect alignment, and then begin to drop as the incoming
+// waveform pattern shifts past the ideal form of the template.
+// 
+// To find the peaks of the symbols scores, the previous n scores are kept in score history
+// buffers (one buffer for each symbol). These are also shift registers, but hold bytes
+// rather than bits. A peak in the scores is detected by looking for the ramp pattern in
+// the score history. The history buffer size, n, should be an odd number (5? 7? 11?), and
+// the peak finder looks for the case where the peak value is in the middle slot, with
+// decreasing (or at least non-increasing) values on either side. (The case of two adjacent
+// maximum values may have to be allowed, as well.)
+//
+// 
+// Timer1 interrupts at 60Hz (one tick), creating the heartbeat. An ISR is responsible
+// for sampling the input signal and shifting it into the input shift register, scoring (x3),
+// and shifting the symbol scores into their shift registers. 
+
 // Heartbeat indicator
 const int PIN_HEARTBEAT = 2; // PORTD bit 2
 
@@ -102,6 +154,12 @@ uint8_t WWVB_FRAME[9] = { 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00 }
 // Pattern matching threshold
 uint8_t scoreThreshold = 64;
 
+// Score history buffers
+const int historyLength = 7;
+unsigned short history_ZERO[historyLength];
+unsigned short history_ONE[historyLength];
+unsigned short history_FRAME[historyLength];
+
 // Current time of day, in UTC
 unsigned short volatile tod_ticks = 0;
 unsigned short volatile tod_seconds = 0;
@@ -120,9 +178,10 @@ void setup() {
 	// Configure SPI pins
 	SPI.begin();
 
-	// Configure PWM
+	// Configure PWM for tube dimming
 	pinMode(PIN_PWM, OUTPUT);
 
+	// HV power supply
 	pinMode(PIN_HV, OUTPUT);
 	digitalWrite(PIN_HV, LOW); // HV on
 
@@ -302,49 +361,34 @@ void heartbeat() {
 	//bool input = (PORTD & B00000001) >> 7;
 	uint8_t input = digitalRead(PIN_WWVB);
 	shiftSample(input);
+	//printSamples();
 
-	//Serial.print(samples[8], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[7], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[6], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[5], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[4], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[3], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[2], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[1], BIN);
-	//Serial.print(' ');
-	//Serial.print(samples[0], BIN);
-	//Serial.print('\n');
+	uint8_t score_ZERO = score(WWVB_ZERO);
+	shiftScore(history_ZERO, historyLength, score_ZERO);
+	uint8_t score_ONE = score(WWVB_ONE);
+	shiftScore(history_ONE, historyLength, score_ZERO);
+	uint8_t score_FRAME = score(WWVB_FRAME);
+	shiftScore(history_FRAME, historyLength, score_ZERO);
 
-	uint8_t score_frame = score(WWVB_FRAME);
-	uint8_t score_one = score(WWVB_ONE);
-	uint8_t score_zero = score(WWVB_ZERO);
+	flashZero(score_ZERO);
+	flashOne(score_ONE);
+	flashFrame(score_FRAME);
 
-	flashZero(score_zero);
-	flashOne(score_one);
-	flashFrame(score_frame);
-
-	if (score_zero > scoreThreshold || score_one > scoreThreshold || score_frame > scoreThreshold) {
-		Serial.print(score_zero);
-		if (score_zero > scoreThreshold)
+	if (score_ZERO > scoreThreshold || score_ONE > scoreThreshold || score_FRAME > scoreThreshold) {
+		Serial.print(score_ZERO);
+		if (score_ZERO > scoreThreshold)
 			Serial.print("**  ");
 		else
 			Serial.print("    ");
 	
-		Serial.print(score_one);
-		if (score_one > scoreThreshold)
+		Serial.print(score_ONE);
+		if (score_ONE > scoreThreshold)
 			Serial.print("**  ");
 		else
 			Serial.print("    ");
 
-		Serial.print(score_frame);
-		if (score_frame > scoreThreshold)
+		Serial.print(score_FRAME);
+		if (score_FRAME > scoreThreshold)
 			Serial.print("**\n");
 		else
 			Serial.print("\n");
@@ -368,6 +412,29 @@ void heartbeat() {
 	tick();
 	// Set heartbeat pin low
 	PORTD &= B11111011;
+}
+
+// Diagnostic to echo sample data on the terminal. Bytes are space-separated; but
+// leading zeroes are omitted; fill in enough zeroes on each segment to make 8 bits.
+void printSamples() {
+	Serial.print(samples[8], BIN);
+	Serial.print(' ');
+	Serial.print(' ');
+	Serial.print(samples[6], BIN);
+	Serial.print(samples[7], BIN);
+	Serial.print(' ');
+	Serial.print(samples[5], BIN);
+	Serial.print(' ');
+	Serial.print(samples[4], BIN);
+	Serial.print(' ');
+	Serial.print(samples[3], BIN);
+	Serial.print(' ');
+	Serial.print(samples[2], BIN);
+	Serial.print(' ');
+	Serial.print(samples[1], BIN);
+	Serial.print(' ');
+	Serial.print(samples[0], BIN);
+	Serial.print('\n');
 }
 
 void flashZero(int score) {
@@ -525,6 +592,13 @@ int score(uint8_t *pattern) {
 	}
 
 	return sum;
+}
+
+void shiftScore(unsigned short *buffer, short int length, unsigned short score){
+	for (int i=length-1;  i>0;  i--) {
+		buffer[i] = buffer[i-1];
+	}
+	buffer[0] = score;
 }
 
 // Increment the time of day
