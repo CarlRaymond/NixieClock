@@ -45,7 +45,7 @@ const int PIN_SCK = 13;
 // period of 33,334 cycles (with prescaler = 8, or 2,000,000Hz clock).
 
 // No. of cycles in a short period
-const uint16_t heartbeat_cycles = 33333;
+const unsigned int heartbeat_cycles = 33333;
 
 // No. of short periods in full sequence
 const uint8_t heartbeat_short_periods = 10;
@@ -62,10 +62,11 @@ volatile uint8_t pixelIndex = 0;
 // First 60 pixels are the ring; the final 10 are the on-board backlight pixels
 Adafruit_NeoPixel ring = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
+// Colors
 const uint32_t OFF = 0L;
 const uint32_t SAMPLE_ONE = ring.Color(6, 1, 0);
-const uint32_t SAMPLE_CURSOR = ring.Color(3, 50, 2);
 const uint32_t SAMPLE_ZERO = ring.Color(5, 1, 8);
+const uint32_t SAMPLE_CURSOR = ring.Color(3, 50, 2);
 
 const uint32_t RED = ring.Color(255,0,0);
 const uint32_t ORANGE = ring.Color(255,50,0);
@@ -86,8 +87,8 @@ uint8_t volatile samples[9];
 
 // Correlation template for a zero bit. From newest to oldest:
 // 48 0s, 12 1s, 12 0s.  Initialzing values start with LSB, which
-// is the most recent bit w.r.t sampled bit values, and progress to
-// the oldest bit.
+// is the most recent bit (the tail end of the pulse), and progress to
+// the oldest bit (the head end).
 uint8_t WWVB_ZERO[9] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0f, 0x00};
 // Correlaton template for one bit. From newest to oldest:
 // 30 0s, 30 1s, 12 0s
@@ -99,7 +100,20 @@ uint8_t WWVB_ONE[9] = { 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0x0f, 0x00 };
 uint8_t WWVB_FRAME[9] = { 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00 };
 
 // Pattern matching threshold
-int scoreThreshold = 48;
+uint8_t scoreThreshold = 64;
+
+// Current time of day, in UTC
+unsigned short volatile tod_ticks = 0;
+unsigned short volatile tod_seconds = 0;
+unsigned short volatile tod_minutes = 0;
+unsigned short volatile tod_hours = 5;
+unsigned int volatile tod_day = 1;
+unsigned int volatile tod_year = 0;
+unsigned int volatile tod_TZoffset = -4;
+bool volatile tod_isdst = true;
+bool volatile tod_isleapminute = false;
+bool volatile tod_isleapyear = false;
+bool volatile tod_changed = false;
 
 void setup() {
 
@@ -110,7 +124,7 @@ void setup() {
 	pinMode(PIN_PWM, OUTPUT);
 
 	pinMode(PIN_HV, OUTPUT);
-	digitalWrite(PIN_HV, HIGH); // HV off
+	digitalWrite(PIN_HV, LOW); // HV on
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
@@ -143,7 +157,14 @@ void setup() {
 	setTubePwm(145);
 	Serial.begin(230400);
 
+	//test_showPatterns();
+	//test_shifter();
 
+}
+
+void test_showPatterns() {
+
+	Serial.print("WWVB_ZERO: ");
 	Serial.print(WWVB_ZERO[8], BIN);
 	Serial.print(' ');
 	Serial.print(WWVB_ZERO[7], BIN);
@@ -163,6 +184,7 @@ void setup() {
 	Serial.print(WWVB_ZERO[0], BIN);
 	Serial.print('\n');
 
+	Serial.print("WWVB_ONE: ");
 	Serial.print(WWVB_ONE[8], BIN);
 	Serial.print(' ');
 	Serial.print(WWVB_ONE[7], BIN);
@@ -182,6 +204,7 @@ void setup() {
 	Serial.print(WWVB_ONE[0], BIN);
 	Serial.print('\n');
 
+	Serial.print("WWVB_FRAME: ");
 	Serial.print(WWVB_FRAME[8], BIN);
 	Serial.print(' ');
 	Serial.print(WWVB_FRAME[7], BIN);
@@ -200,20 +223,72 @@ void setup() {
 	Serial.print(' ');
 	Serial.print(WWVB_FRAME[0], BIN);
 	Serial.print('\n');
-
 }
 
+void test_shifter() {
+	// Shift in a simulated WWVB_ZERO, then compare to the other patterns
+	for (short i=0; i<12; i++) {
+		shiftSample(0);
+	}
+	for (short i=0; i<12; i++) {
+		shiftSample(1);
+	}
+	for (short i=0; i<48; i++) {
+		shiftSample(0);
+	}
+
+	Serial.print("ZERO on ZERO: ");
+	Serial.print(score(WWVB_ZERO));
+	Serial.print("\nZERO on ONE: ");
+	Serial.print(score(WWVB_ONE));
+	Serial.print("\nZERO on FRAME: ");
+	Serial.print(score(WWVB_FRAME));
+	Serial.print("\n");
+
+	// Shift in a simulated WWVB_ONE, then compare to the other patterns
+	for (short i=0; i<12; i++) {
+		shiftSample(0);
+	}
+	for (short i=0; i<30; i++) {
+		shiftSample(1);
+	}
+	for (short i=0; i<30; i++) {
+		shiftSample(0);
+	}
+
+	Serial.print("ONE on ZERO: ");
+	Serial.print(score(WWVB_ZERO));
+	Serial.print("\nONE on ONE: ");
+	Serial.print(score(WWVB_ONE));
+	Serial.print("\nONE on FRAME: ");
+	Serial.print(score(WWVB_FRAME));
+	Serial.print("\n");
+
+	// Shift in a simulated WWVB_FRAME, then compare to the other patterns
+	for (short i=0; i<12; i++) {
+		shiftSample(0);
+	}
+	for (short i=0; i<48; i++) {
+		shiftSample(1);
+	}
+	for (short i=0; i<12; i++) {
+		shiftSample(0);
+	}
+	
+	Serial.print("FRAME on ZERO: ");
+	Serial.print(score(WWVB_ZERO));
+	Serial.print("\nFRAME on ONE: ");
+	Serial.print(score(WWVB_ONE));
+	Serial.print("\nFRAME on FRAME: ");
+	Serial.print(score(WWVB_FRAME));
+	Serial.print("\n");
+}
 
 void loop() {
-
-	for (int hour=1;  hour<24;  hour++) {
-		setHours(hour);
-		for (int sec=0;  sec<60;  sec++) {
-			setSeconds(sec);
-			setMinutes(59 - sec);
-			updateNixies();
-			delay(17);
-		}
+	if (tod_changed) {
+		tod_changed = false;
+		updateTimeOfDayLocal();
+		updateNixies();
 	}
 }
 
@@ -247,9 +322,9 @@ void heartbeat() {
 	//Serial.print(samples[0], BIN);
 	//Serial.print('\n');
 
-	int score_frame = score(WWVB_FRAME);
-	int score_one = score(WWVB_ONE);
-	int score_zero = score(WWVB_ZERO);
+	uint8_t score_frame = score(WWVB_FRAME);
+	uint8_t score_one = score(WWVB_ONE);
+	uint8_t score_zero = score(WWVB_ZERO);
 
 	flashZero(score_zero);
 	flashOne(score_one);
@@ -290,100 +365,124 @@ void heartbeat() {
 
 	ring.show();
 
+	tick();
 	// Set heartbeat pin low
 	PORTD &= B11111011;
 }
 
 void flashZero(int score) {
+	static int hold = 0;
+
 	if (score > scoreThreshold) {
+		hold = 20;
 		ring.setPixelColor(68, FLASH);
 		ring.setPixelColor(69, FLASH);
 	}
 	else {
-		ring.setPixelColor(68, BLUE);
-		ring.setPixelColor(69, PURPLE);
+		if (hold > 0)
+			hold--;
+		else {
+			ring.setPixelColor(68, BLUE);
+			ring.setPixelColor(69, PURPLE);
+		}
 	}
 }
 
 void flashOne(int score) {
+	static int hold = 0;
+
 	if (score > scoreThreshold) {
+		hold = 20;
 		ring.setPixelColor(64, FLASH);
 		ring.setPixelColor(65, FLASH);
 	}
 	else {
-		ring.setPixelColor(64, YELLOW);
-		ring.setPixelColor(65, GREEN);
+		if (hold > 0)
+			hold--;
+		else {
+			ring.setPixelColor(64, YELLOW);
+			ring.setPixelColor(65, GREEN);
+		}
 	}
 }
 
 void flashFrame(int score) {
+	static int hold = 0;
+
 	if (score > scoreThreshold) {
+		hold = 20;
 		ring.setPixelColor(60, FLASH);
 		ring.setPixelColor(61, FLASH);
 	}
 	else {
-		ring.setPixelColor(60, RED);
-		ring.setPixelColor(61, ORANGE);
+		if (hold > 0)
+			hold--;
+		else {
+			ring.setPixelColor(60, RED);
+			ring.setPixelColor(61, ORANGE);
+		}
 	}
 }
 
 // Shifts in a new bit sample into the array. The new bit is the LSB of the value
 void shiftSample(uint8_t value) {
 
-	// Shift LSB of value into C flag
-	asm volatile(
-		"lsr %0 \n\t" : "=r" (value) : "0" (value) 
-	);
-
 	// Shift sample array left one bit
 	asm volatile(
 
-		// The two lines below are auto-generated by the compiler as a result
-		// of the ' "e" (samples) ' constraint at the end of this asm block.
-		// The compiler will select a base register (X, Y or Z) to hold the address
-		// of 'samples', and the expression %a0 will be replaced with the selected
-		// base register.
+		// Constraints at end of asm block:
+		// Output constraints:
+		// "=r" (value)		Contstraint 0: Variable "value" will be written. Use a register for it.
+		// Input constraints
+		// "e" (samples)	Constraint 1: Set one of X, Y, or Z base register to address of "samples".
+		//					Refer to it with %a1. (This code will be inserted at top of the asm block.)
+		// "0" (value)		Constraint 2: Varialbe "value" will be input to an operation. It's
+		//					location must match that used for constraint 0 (same register). Refer
+		//					to it as %2.
 
-		//"ldi %A0, lo8(samples) \n\t"
-		//"ldi %B0, hi8(samples) \n\t"
-
-		// Unrolled loop to shift 9 bytes
-		"ld __tmp_reg__, %a0 \n\t"
+		// Shift LSB of value into Carry flag
+		"lsr %2 \n\t"
+		
+		// Unrolled loop to shift 9 bytes.  __tmp_reg__ will be replaced with a register
+		// that can be used freely, without saving or restoring its value.
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
 
-		"ld __tmp_reg__, %a0 \n\t"
+		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
-		"st %a0+, __tmp_reg__ \n\t"
-		:  : "e" (samples)
+		"st %a1+, __tmp_reg__ \n\t"
+
+		// See above for constraint explanation
+		: "=r" (value) : "e" (samples), "0" (value)
 	);
 }
 
@@ -431,8 +530,68 @@ int score(uint8_t *pattern) {
 // Increment the time of day
 void tick() {
 
+	tod_ticks++;
+	if (tod_ticks < 60)
+		return;
+
+	tod_changed = true;
+	tod_ticks = 0;
+	tod_seconds++;
+	
+	unsigned short minute_length = 60;
+	if (tod_isleapminute)
+		minute_length = 61;
+
+	if (tod_seconds < minute_length)
+		return;
+
+	tod_isleapminute = false;
+	tod_seconds = 0;
+	tod_minutes++;
+	if (tod_minutes < 60)
+		return;
+
+	tod_minutes = 0;
+	tod_hours++;
+	if (tod_hours < 24)
+		return;
+
+	tod_hours = 0;
+	tod_day++;
+
+	unsigned int year_length = 365;
+	if (tod_isleapyear)
+		year_length = 366;
+	if (tod_day < year_length)
+		return;
+
+	tod_day = 1;
+	tod_year++;
+
 }
 
+// Set the current time of day on the hours, minutes, and seconds digits, 
+// using UTC.
+void updateTimeOfDayUtc() {
+	setSeconds(tod_seconds);
+	setMinutes(tod_minutes);
+	setHours(tod_hours);
+}
+
+// Set current local time of day on the hours, minutes and seconds digits.
+void updateTimeOfDayLocal() {
+
+	unsigned short local_hours = tod_hours + tod_TZoffset;
+	if (local_hours > 23) {
+		local_hours -= 23;
+	}
+
+	setSeconds(tod_seconds);
+	setMinutes(tod_minutes);
+	setHours(local_hours);
+}
+
+// Send current nixie data
 void updateNixies() {
 	digitalWrite(PIN_RCK, LOW);
 	SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
@@ -443,6 +602,7 @@ void updateNixies() {
 	digitalWrite(PIN_RCK, HIGH);
 }
 
+// Clear all nixie digits
 void resetNixies() {
 	for (int i=0; i<6; i++) {
 		nixieData[i] = 0;
