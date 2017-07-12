@@ -23,29 +23,36 @@
 // containing complete time-of-day (TOD) data, is 60 bits, taking one minute,
 // and is transmitted continuously. Each full frame gives the minute, hour, day, year
 // (and some status bits) as of the moment that frame began. The frame does not include
-// seconds; they are implcit. Second "0" is the first bit of the frame.
+// seconds; they are implcit. Second "0" begins at the start of the first bit of the frame.
 //
 // There are three possible symbol patterns within the word that can be received: a logic
 // zero, a logic one, and a framing symbol that helps to determine begining and end of each
-// frame.
-// WWVB_ZERO: 0.2s (12 sample periods) high, 0.8s (48 sample periods) low
-// WWVB_ONE: 0.5s (30 sample periods) high, 0.5s (30 sample periods) low
-// WWVB_FRAME: 0.8s (48 sample periods) high, 0.2s (12 sample periods) low
+// frame. Each is a pulse with a varying high time and low time.
+// WWVB_ZERO: 0.2s high, 0.8s low
+// WWVB_ONE: 0.5s high, 0.5s low
+// WWVB_FRAME: 0.8s high, 0.2s low
 // 
-// The incoming bitstream is sampled at 60 Hz, and stored in a shift register.
-// Symbols are detected by comparing the stored samples with "perfect" templates of
+// The incoming bitstream is sampled at 60 Hz, and and bits are transferred to a shift register.
+// Symbols are detected by comparing the stored samples with ideal templates of
 // the three possible symbols. A scoring function counts up the number of
-// matching bits, and on each bit shift compares the sampled data to the three templates.
+// matching bits, and on each bit shift compares the sampled data to the three templates. At
+// the 60Hz sample rate, a perfect bit pattern for WWVB_ZERO would consist of 12 high samples,
+// followed by 48 low samples.
 //
-// The shift register and matching patterns are 72 bits instead of only 60 to take advantage
-// of the fact that all three symbols end with at least 12 samples of low. The pattern templates
-// incorporate the 12 low samples (representing the tail end of the preceeding symbol) at their
-// head end, and then follow with the 60 samples representing the symbol.
-// While the additional 12 bits do not help to distinguish one symbol from another (since they
+// The shift register and matching patterns are 80 bits instead of only 60. This allows
+// capturing and comparing not just a full pulse, but some of the preceding pulse's tail end,
+// and some of the following pulse's head end as well. Including these extra transitions will
+// clearly delineate a pulse, and improve noise immunity. The matching patterns include 10 extra
+// bits at the front and 10 bits at the back, bracketing the 60 samples for the symbol.
+// Since all three symbols begin with at least 12 high samples, and end with at least 12 low
+// samples, padding the patterns with only 10 bits prevents any chance of having an extra
+// transition at either end of the sample buffer because of timing inaccuracy. Also, a buffer
+// size that is a multiple of 8 bits is simpler to deal with.
+// While the additional 20 bits do not help to distinguish one symbol from another (since they
 // are the same for all symbols), they do help to distinguish a valid symbol from random
 // noise.
 // A match is detected when a symbols's score exceeds a threshold value. The threshold is below
-// the maximum score of 72 to account for both noise in the received signal, and inaccuracy
+// the maximum score of 80 to account for both noise in the received signal, and inaccuracy
 // in the local sampling clock.
 //
 // This sample, shift, and score process happens continuously in the background, at 60Hz, and is
@@ -135,24 +142,24 @@ uint8_t nixieData[6];
 // 72-bit long shift register for input samples. Little endian.
 // Offset 0, bit 0 has most recent sample bit; offset 8 bit 7
 // has oldest sample bit. Shifts left. 
-uint8_t volatile samples[9];
+uint8_t volatile samples[10];
 
-// Correlation template for a zero bit. From newest to oldest:
-// 48 0s, 12 1s, 12 0s.  Initialzing values start with LSB, which
+// Correlation template for a zero bit, including the trailing 1s of the preceding symbol,
+// and the leading 0s of the following symbol. From newest (tail end) to oldest (head end):
+// 10 1s, 48 0s, 12 1s, 10 0s.  Initialzing values start with LSB, which
 // is the most recent bit (the tail end of the pulse), and progress to
-// the oldest bit (the head end).
-uint8_t WWVB_ZERO[9] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0f, 0x00};
+// the oldest bit (the head end).  (Remember: bytes are written LSB first, but bits
+// in a byte are reversed!)
+uint8_t WWVB_ZERO[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x3f, 0x00 };
 // Correlaton template for one bit. From newest to oldest:
-// 30 0s, 30 1s, 12 0s
-//uint8_t WWVB_ONE[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xC0, 0x00, 0x00, 0x00 };
-uint8_t WWVB_ONE[9] = { 0x00, 0x00, 0x00, 0xc0, 0xff, 0xff, 0xff, 0x0f, 0x00 };
+// 10 1s, 30 0s, 30 1s, 10 0s
+uint8_t WWVB_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 // Correlation template for frame bit. From newest to oldest:
-// 12 0s, 48 1s, 12 0s
-//uint8_t WWVB_FRAME[9] = { 0x00, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0, 0x00 };
-uint8_t WWVB_FRAME[9] = { 0x00, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x00 };
+// 10 1s, 12 0s, 48 1s, 10 0s
+uint8_t WWVB_FRAME[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
-uint8_t scoreThreshold = 64;
+uint8_t scoreThreshold = 70;
 
 // Score history buffers
 const int historyLength = 7;
@@ -163,9 +170,9 @@ unsigned short history_FRAME[historyLength];
 // Current time of day, in UTC
 unsigned short volatile tod_ticks = 0;
 unsigned short volatile tod_seconds = 0;
-unsigned short volatile tod_minutes = 0;
-unsigned short volatile tod_hours = 5;
-unsigned int volatile tod_day = 1;
+unsigned short volatile tod_minutes = 52;
+unsigned short volatile tod_hours = 12;
+unsigned int volatile tod_day = 0;
 unsigned int volatile tod_year = 0;
 unsigned int volatile tod_TZoffset = -4;
 bool volatile tod_isdst = true;
@@ -224,6 +231,8 @@ void setup() {
 void test_showPatterns() {
 
 	Serial.print("WWVB_ZERO: ");
+	Serial.print(WWVB_ZERO[9], BIN);
+	Serial.print(' ');
 	Serial.print(WWVB_ZERO[8], BIN);
 	Serial.print(' ');
 	Serial.print(WWVB_ZERO[7], BIN);
@@ -244,6 +253,8 @@ void test_showPatterns() {
 	Serial.print('\n');
 
 	Serial.print("WWVB_ONE: ");
+	Serial.print(WWVB_ONE[9], BIN);
+	Serial.print(' ');
 	Serial.print(WWVB_ONE[8], BIN);
 	Serial.print(' ');
 	Serial.print(WWVB_ONE[7], BIN);
@@ -264,6 +275,8 @@ void test_showPatterns() {
 	Serial.print('\n');
 
 	Serial.print("WWVB_FRAME: ");
+	Serial.print(WWVB_FRAME[9], BIN);
+	Serial.print(' ');
 	Serial.print(WWVB_FRAME[8], BIN);
 	Serial.print(' ');
 	Serial.print(WWVB_FRAME[7], BIN);
@@ -286,7 +299,7 @@ void test_showPatterns() {
 
 void test_shifter() {
 	// Shift in a simulated WWVB_ZERO, then compare to the other patterns
-	for (short i=0; i<12; i++) {
+	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
 	for (short i=0; i<12; i++) {
@@ -294,6 +307,10 @@ void test_shifter() {
 	}
 	for (short i=0; i<48; i++) {
 		shiftSample(0);
+	}
+
+	for (short i=0; i<10; i++) {
+		shiftSample(1);
 	}
 
 	Serial.print("ZERO on ZERO: ");
@@ -305,7 +322,7 @@ void test_shifter() {
 	Serial.print("\n");
 
 	// Shift in a simulated WWVB_ONE, then compare to the other patterns
-	for (short i=0; i<12; i++) {
+	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
 	for (short i=0; i<30; i++) {
@@ -313,6 +330,9 @@ void test_shifter() {
 	}
 	for (short i=0; i<30; i++) {
 		shiftSample(0);
+	}
+	for (short i=0; i<10; i++) {
+		shiftSample(1);
 	}
 
 	Serial.print("ONE on ZERO: ");
@@ -324,7 +344,7 @@ void test_shifter() {
 	Serial.print("\n");
 
 	// Shift in a simulated WWVB_FRAME, then compare to the other patterns
-	for (short i=0; i<12; i++) {
+	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
 	for (short i=0; i<48; i++) {
@@ -332,6 +352,9 @@ void test_shifter() {
 	}
 	for (short i=0; i<12; i++) {
 		shiftSample(0);
+	}
+	for (short i=0; i<10; i++) {
+		shiftSample(1);
 	}
 	
 	Serial.print("FRAME on ZERO: ");
@@ -417,11 +440,13 @@ void heartbeat() {
 // Diagnostic to echo sample data on the terminal. Bytes are space-separated; but
 // leading zeroes are omitted; fill in enough zeroes on each segment to make 8 bits.
 void printSamples() {
+	Serial.print(samples[9], BIN);
+	Serial.print(' ');
 	Serial.print(samples[8], BIN);
 	Serial.print(' ');
+	Serial.print(samples[7], BIN);
 	Serial.print(' ');
 	Serial.print(samples[6], BIN);
-	Serial.print(samples[7], BIN);
 	Serial.print(' ');
 	Serial.print(samples[5], BIN);
 	Serial.print(' ');
@@ -510,8 +535,12 @@ void shiftSample(uint8_t value) {
 		// Shift LSB of value into Carry flag
 		"lsr %2 \n\t"
 		
-		// Unrolled loop to shift 9 bytes.  __tmp_reg__ will be replaced with a register
+		// Unrolled loop to shift 10 bytes.  __tmp_reg__ will be replaced with a register
 		// that can be used freely, without saving or restoring its value.
+		"ld __tmp_reg__, %a1 \n\t"
+		"rol __tmp_reg__ \n\t"
+		"st %a1+, __tmp_reg__ \n\t"
+
 		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
 		"st %a1+, __tmp_reg__ \n\t"
@@ -585,7 +614,7 @@ uint8_t parity[256] = {
 int score(uint8_t *pattern) {
 
 	int sum = 0;
-	for (int i=0; i<9; i++) {
+	for (int i=0; i<10; i++) {
 		// Compute matching bits: XOR pattern and samples, and complement
 		uint8_t bits = ~(samples[i] ^ pattern[i]);
 		sum += parity[bits];
