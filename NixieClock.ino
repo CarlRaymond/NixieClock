@@ -198,7 +198,7 @@ bool volatile tod_changed = false;
 uint8_t fakedata[] = {
 	FRAME,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	FRAME
 };
-DataGenerator fake_frame = DataGenerator(fakedata, 10);
+DataGenerator fake_frame = DataGenerator(fakedata, 10, 50);
 
 void setup() {
 
@@ -424,6 +424,7 @@ void heartbeat() {
 	flashOne(score_ONE);
 	flashFrame(score_FRAME);
 
+	static bool separated = false;
 	if (score_ZERO > scoreThreshold || score_ONE > scoreThreshold || score_FRAME > scoreThreshold) {
 		Serial.print(score_ZERO);
 		if (score_ZERO > scoreThreshold)
@@ -442,6 +443,14 @@ void heartbeat() {
 			Serial.print("**\n");
 		else
 			Serial.print("\n");
+
+		separated = false;
+	}
+	else {
+		if (!separated) {
+			Serial.print("----------\n");
+			separated = true;
+		}
 	}
 
 	if (input) {

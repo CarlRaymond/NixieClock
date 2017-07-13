@@ -1,27 +1,28 @@
 #include "DataGenerator.h"
 
-DataGenerator::DataGenerator(uint8_t *pattern, int length) {
+DataGenerator::DataGenerator(uint8_t *pattern, int length, int noiselevel) {
 	this->pattern = pattern;
 	this->length = length;
+	this->noiselevel = noiselevel;
 	this->position = 0;
 	SetCounts(pattern[0]);
 }
 
 uint8_t DataGenerator::NextBit() {
 
-	// Issue a high bit for current symbol?
+	// Any more high bits for current symbol?
 	if (high_count > 0) {
 		high_count--;
-		return 1;
+		return Noisy(1);
 	}
 
-	// Issue a low bit for current symbol?
+	// Any more low bits for current symbol?
 	if (low_count > 0) {
 		low_count--;
-		return 0;
+		return Noisy(0);
 	}
 
-	// Advance to next symbol. Loop to beginning on end.
+	// Advance to next symbol. Loop back to beginning on end.
 	position++;
 	if (position >= length)
 		position = 0;
@@ -30,7 +31,21 @@ uint8_t DataGenerator::NextBit() {
 
 	// Send leading bit
 	high_count--;
-	return 1;
+	return Noisy(1);
+}
+
+// Randomly flip a bit, based on the noise level.
+uint8_t DataGenerator::Noisy(uint8_t val) {
+	if (noiselevel == 0)
+		return false;
+
+	if (random(1000) > noiselevel) {
+		// Unflipped.
+		return val;
+	}
+
+	// Flipped.
+	return 1-val;
 }
 
 void DataGenerator::SetCounts(uint8_t symbol) {
