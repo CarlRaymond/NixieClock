@@ -1,4 +1,5 @@
 #include <SPI.h>
+#include "DataGenerator.h"
 #include <Adafruit_NeoPixel.h>
 #ifdef __AVR__
   #include <avr/power.h>
@@ -57,7 +58,7 @@
 //
 // This sample, shift, and score process happens continuously in the background, at 60Hz, and is
 // the first phase in decoding the bitstream. The second phase consists of watching the
-// constantly changing triples of symbol scores and, detecting when they reach a peak.
+// constantly changing triples of symbol scores and detecting when they reach a peak.
 // By the nature of the bit shifting, scores will follow a ramp pattern: as the incoming
 // bits for a symbols get closer to perfect alignment with the pattern, the score will
 // increase, reach a peak at perfect alignment, and then begin to drop as the incoming
@@ -69,12 +70,25 @@
 // the score history. The history buffer size, n, should be an odd number (5? 7? 11?), and
 // the peak finder looks for the case where the peak value is in the middle slot, with
 // decreasing (or at least non-increasing) values on either side. (The case of two adjacent
-// maximum values may have to be allowed, as well.)
+// maximum values may have to be handled, as well.)
 //
+// At this point, the data bits can be recognized by the appearance of the peaks in the three
+// symbol scoring buffers. Right after receiving a nice clean bit, one of the three buffers should
+// show a score above the threshold, with a peak value. The other two buffers should show scores
+// below the threshold, and not sharply peaked. After 60 ticks (one second), the following bit
+// will have been recieved, and one of the three buffers should show a peak, ideally in the same
+// position within the buffer. If the receiver should miss a bit, no buffer will show a peak.
+//
+// The task now is to keep the location of the peak from drifting as successive bits are decoded. Drift
+// indicates that the tick interval timer's period is too short or too long. On noticing drift (after
+// some low-pass filtering of the peak slot), the timer period is adjusted up or down slightly to
+// compensate.
 // 
 // Timer1 interrupts at 60Hz (one tick), creating the heartbeat. An ISR is responsible
 // for sampling the input signal and shifting it into the input shift register, scoring (x3),
 // and shifting the symbol scores into their shift registers. 
+//
+// Timer2 is configured for PWM, at 244Hz, to control tube brightness.
 
 // Heartbeat indicator
 const int PIN_HEARTBEAT = 2; // PORTD bit 2
@@ -139,23 +153,23 @@ const uint32_t FLASH = ring.Color(255, 128, 128);
 // Six bytes of data for nixies
 uint8_t nixieData[6];
 
-// 72-bit long shift register for input samples. Little endian.
-// Offset 0, bit 0 has most recent sample bit; offset 8 bit 7
+// 80-bit long shift register for input samples. Little endian.
+// Offset 0, bit 0 has most recent sample bit; offset 9 bit 7
 // has oldest sample bit. Shifts left. 
 uint8_t volatile samples[10];
 
-// Correlation template for a zero bit, including the trailing 1s of the preceding symbol,
-// and the leading 0s of the following symbol. From newest (tail end) to oldest (head end):
-// 10 1s, 48 0s, 12 1s, 10 0s.  Initialzing values start with LSB, which
+// Correlation template for a zero bit, including the trailing 0s of the preceding symbol,
+// and the leading 1s of the following symbol. From head end to tail end:
+// 10 0s, 12 1s, 48 0s, 10 0s.  Initialzing values start with LSB, which
 // is the most recent bit (the tail end of the pulse), and progress to
 // the oldest bit (the head end).  (Remember: bytes are written LSB first, but bits
 // in a byte are reversed!)
 uint8_t WWVB_ZERO[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x3f, 0x00 };
-// Correlaton template for one bit. From newest to oldest:
-// 10 1s, 30 0s, 30 1s, 10 0s
+// Correlaton template for one bit. From head to tail:
+// 10 0s, 30 1s, 30 0s, 10 1s
 uint8_t WWVB_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f, 0x00 };
-// Correlation template for frame bit. From newest to oldest:
-// 10 1s, 12 0s, 48 1s, 10 0s
+// Correlation template for frame bit. From head to tail:
+// 10 0s, 48 1s, 12 0s, 10 1s
 uint8_t WWVB_FRAME[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
@@ -167,11 +181,11 @@ unsigned short history_ZERO[historyLength];
 unsigned short history_ONE[historyLength];
 unsigned short history_FRAME[historyLength];
 
-// Current time of day, in UTC
+// Current time of day, UTC
 unsigned short volatile tod_ticks = 0;
 unsigned short volatile tod_seconds = 0;
-unsigned short volatile tod_minutes = 52;
-unsigned short volatile tod_hours = 12;
+unsigned short volatile tod_minutes = 24;
+unsigned short volatile tod_hours = 11;
 unsigned int volatile tod_day = 0;
 unsigned int volatile tod_year = 0;
 unsigned int volatile tod_TZoffset = -4;
@@ -179,6 +193,12 @@ bool volatile tod_isdst = true;
 bool volatile tod_isleapminute = false;
 bool volatile tod_isleapyear = false;
 bool volatile tod_changed = false;
+
+// Prepare some fake data
+uint8_t fakedata[] = {
+	FRAME,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	FRAME
+};
+DataGenerator fake_frame = DataGenerator(fakedata, 10);
 
 void setup() {
 
@@ -220,11 +240,12 @@ void setup() {
 
 	ring.show();
 
-	setTubePwm(145);
+	setTubePwm(150);
 	Serial.begin(230400);
 
-	//test_showPatterns();
-	//test_shifter();
+
+	test_showPatterns();
+	test_shifter();
 
 }
 
@@ -366,6 +387,9 @@ void test_shifter() {
 	Serial.print("\n");
 }
 
+
+
+
 void loop() {
 	if (tod_changed) {
 		tod_changed = false;
@@ -382,7 +406,8 @@ void heartbeat() {
 
 	// Sample the input - port D bit 7
 	//bool input = (PORTD & B00000001) >> 7;
-	uint8_t input = digitalRead(PIN_WWVB);
+	//uint8_t input = digitalRead(PIN_WWVB);
+	uint8_t input = fake_frame.NextBit();
 	shiftSample(input);
 	//printSamples();
 
@@ -392,6 +417,8 @@ void heartbeat() {
 	shiftScore(history_ONE, historyLength, score_ZERO);
 	uint8_t score_FRAME = score(WWVB_FRAME);
 	shiftScore(history_FRAME, historyLength, score_ZERO);
+
+
 
 	flashZero(score_ZERO);
 	flashOne(score_ONE);
@@ -438,7 +465,7 @@ void heartbeat() {
 }
 
 // Diagnostic to echo sample data on the terminal. Bytes are space-separated; but
-// leading zeroes are omitted; fill in enough zeroes on each segment to make 8 bits.
+// leading zeroes are omitted; remember to mentally fill in enough zeroes on each segment to make 8 bits.
 void printSamples() {
 	Serial.print(samples[9], BIN);
 	Serial.print(' ');
@@ -536,7 +563,8 @@ void shiftSample(uint8_t value) {
 		"lsr %2 \n\t"
 		
 		// Unrolled loop to shift 10 bytes.  __tmp_reg__ will be replaced with a register
-		// that can be used freely, without saving or restoring its value.
+		// that can be used freely, without saving or restoring its value. %a1 refers to the
+		// pointer register selected by the compiler.
 		"ld __tmp_reg__, %a1 \n\t"
 		"rol __tmp_reg__ \n\t"
 		"st %a1+, __tmp_reg__ \n\t"
@@ -628,6 +656,53 @@ void shiftScore(unsigned short *buffer, short int length, unsigned short score){
 		buffer[i] = buffer[i-1];
 	}
 	buffer[0] = score;
+}
+
+// Locates the peak position in a score buffer. A peak means while scanning over the buffer, scores are first
+// increasing (really non-decreasing) to a value above the threshold, and then decreasing (really non-increasing)
+// thereafter. If all scores are below the threshold, returns false; otherwise, returns true, and the peak position
+// is passed out in pos_out.
+bool hasPeak(unsigned short *buffer, short int length, int *pos_out) {
+	short int pos = 1;
+
+	// Find max value and position
+	short int max_pos = 0;
+    short int max_val = buffer[0];
+	for (int i=1;  i < length;  i++) {
+		if (buffer[i] > max_val) {
+			max_val = buffer[i];
+			max_pos = i;
+		}
+	}
+
+	if (max_val < scoreThreshold)
+		return false;
+
+	// Non-increasing toward pos 0?
+	if (max_pos == 0)
+		return false;
+	short int prior = max_val;
+	short int current;
+	for (int i = max_pos - 1;  i>=0;  i--) {
+		current = buffer[i];
+		if (current > prior)
+			return false;
+		prior = current;
+	}
+
+	// Non-increasing toward pos n?
+	if (max_pos == length-1)
+		return false;
+	prior = max_val;
+	for (int i = max_pos + 1;  i>length;  i++) {
+		current = buffer[i];
+		if (current > prior)
+			return false;
+		prior = current;
+	}
+	
+	*pos_out = max_pos;
+	return true;
 }
 
 // Increment the time of day
