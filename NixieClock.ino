@@ -102,8 +102,10 @@
 // Heartbeat indicator
 const int PIN_HEARTBEAT = 2; // PORTD bit 2
 
+// PWM for tube brightness
 const int PIN_PWM = 3;
 
+// HV supply /enable
 const int PIN_HV = 5;
 
 // Ring serial output
@@ -112,33 +114,34 @@ const int PIN_PIXEL = 6;
 // SYMTRIK input pin
 const int PIN_WWVB = 7; // PORTD bit 7
 
+// Nixie tube register clock (RCK)
 const int PIN_RCK = 8;
 
-// SPI pins
+// SPI pins for Nixie tube data and SRCK
 const int PIN_MOSI = 11;
-const int PIN_MISO = 12;
+const int PIN_MISO = 12; // Unused
 const int PIN_SCK = 13;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
-// "fractional PLL" technique.  Count heartbeat_frac_numerator (out of
-// heartbeat_frac_denominator) using heartbeat_cycles+1, and the remainder
-// using heartbeat_cycles.
+// "fractional PLL" technique.  Count tick_frac_numerator (out of
+// tick_frac_denominator) using tick_interval_cycles+1, and the remainder
+// using tick_interval_cycles.
 // For 60Hz, count two periods of 33,333 cycles for each 
 // period of 33,334 cycles (with prescaler = 8, or 2,000,000Hz clock).
 
 // No. of (whole) cycles in a short period
-unsigned int heartbeat_cycles = 33333;
+volatile uint16_t tick_interval_cycles = 33333;
+
+// No. of long periods in full sequence, i.e. fractional part, 0/16 to 15/16
+volatile uint8_t tick_frac_numerator = 5;
 
 // Total no. of periods in full sequence; i.e., denominator of fractional part.
 // A power of 2 to simplify math.
-const uint8_t heartbeat_frac_denominator = 16;
-
-// No. of long periods in full sequence, i.e. fractional part, 0/16 to 15/16
-uint8_t heartbeat_frac_numerator = 5;
+const uint8_t tick_frac_denominator = 16;
 
 // Communicates to main loop that the heartbeat period changed. Set true during
 // interrupt processing; reset in main loop.
-volatile bool heartbeat_period_changed = false;
+volatile bool tick_interval_changed = false;
 
 // First 60 pixels are the ring; the final 10 are the on-board backlight pixels
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
@@ -236,7 +239,7 @@ void setup() {
 
 	// HV power supply
 	pinMode(PIN_HV, OUTPUT);
-	digitalWrite(PIN_HV, LOW); // HV on
+	digitalWrite(PIN_HV, HIGH); // HV off
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
@@ -302,15 +305,23 @@ void loop() {
 		Serial.print('\n');
 
 		Serial.print("Tick interval: ");
-		Serial.print(heartbeat_cycles);
+		Serial.print(tick_interval_cycles);
 		Serial.print(' ');
-		Serial.print(heartbeat_frac_numerator);
+		Serial.print(tick_frac_numerator);
 		Serial.print('/');
-		Serial.print(heartbeat_frac_denominator);
+		Serial.print(tick_frac_denominator);
 		Serial.print('\n');
 
-		// Set time of day from the symbol frame, taking processing time offset.
+		// Set time of day from the symbol frame, taking processing time offset into account.
 		decodeTimeOfDay(14);
+
+		Serial.print("Decoded time (UTC): ");
+		Serial.print(tod_hours);
+		Serial.print(':');
+		Serial.print(tod_minutes);
+		Serial.print(':');
+		Serial.print(tod_seconds);
+		Serial.print('\n');
 	}
 
 	if (tod_changed) {
@@ -319,14 +330,14 @@ void loop() {
 		updateNixies();
 	}
 
-	if (heartbeat_period_changed) {
-		heartbeat_period_changed = false;
-		Serial.print ("Pretending to save new heartbeat period of ");
-		Serial.print(heartbeat_cycles);
+	if (tick_interval_changed) {
+		tick_interval_changed = false;
+		Serial.print ("Pretending to save new tick interval of ");
+		Serial.print(tick_interval_cycles);
 		Serial.print(' ');
-		Serial.print(heartbeat_frac_numerator);
+		Serial.print(tick_frac_numerator);
 		Serial.print('/');
-		Serial.print(heartbeat_frac_denominator);
+		Serial.print(tick_frac_denominator);
 		Serial.print('\n');
 	}
 
@@ -396,10 +407,11 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 	if (symbolStream[55] & 0x01) leapYear = true;
 
- 	// Update time of day. Seconds value is implicitly 0.
+ 	// Update time of day. Decoded time is that at the start of the current frame transmission,
+	// so the current minute is one later. Seconds value is implicitly 0.
 	tod_ticks = ticksDelta;
 	tod_seconds = 0;
-	tod_minutes = minutes;
+	tod_minutes = minutes + 1;
 	tod_hours = hours;
 	tod_day = daynum;
 	tod_year = year;
@@ -501,6 +513,7 @@ int bitSeek_tickCount = 0;
 // Variables for MODE_BITSYNC
 uint8_t bitSync_ticksRemaining = 60;
 long bitSync_ticksSinceSync;
+uint8_t bitSync_dropCountdown = 30;
 
 // Changes the operating mode, updating necessary variables.
 void setMode(uint8_t newMode) {
@@ -515,6 +528,7 @@ void setMode(uint8_t newMode) {
 		case MODE_BITSYNC:
 			bitSync_ticksRemaining = 60;
 			bitSync_ticksSinceSync = 0;
+			bitSync_dropCountdown = 30;
 			setColonColor(BLUE);
 			break;
 	}
@@ -573,7 +587,6 @@ void bitSeek() {
 // time interval.
 // If we fail to see a symbol for 30 counts, switch back to MODE_BITSEEK.
 void bitSync() {
-	static uint8_t failCountdown = 30;
 
 	bitSync_ticksSinceSync++;
 	if (--bitSync_ticksRemaining > 0)
@@ -585,20 +598,20 @@ void bitSync() {
 
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
 		shiftSymbol('0');
-		failCountdown = 30;
+		bitSync_dropCountdown = 30;
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
 		shiftSymbol('1');
-		failCountdown = 30;
+		bitSync_dropCountdown = 30;
 	}
 	else if (scoreboard_frame.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
 		shiftSymbol('F');
-		failCountdown = 30;
+		bitSync_dropCountdown = 30;
 	}
 	else {
 		// No symbol seen.
 		shiftSymbol('X');
-		if (--failCountdown) {
+		if (--bitSync_dropCountdown) {
 			setMode(MODE_BITSEEK);
 		}
 		return;
@@ -611,21 +624,21 @@ void bitSync() {
 	// too often.
 	switch (maxIndex) {
 		case 0:
-			// Symbol arrived 3 slots early. Tick period too long. Shorten.
-			Serial.print(" LONG ");
+			// Symbol arrived 3 slots late (w.r.t. local clock -- we're fast). Tick period too short. Lengthen.
+			Serial.print(" SHORT ");
 
-			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync+3);
+			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync-3);
 
-			// Re-sync by waiting 3 extra ticks before next check.
+			// Re-sync by waiting 3 more ticks before next check.
 			bitSync_ticksRemaining = 63;
 			bitSync_ticksSinceSync = 0L;
 			break;
 
 		case 7:
-			// Symbol arrived 3 slots late. Tick period too short. Lengthen.
-			Serial.print(" SHORT ");
+			// Symbol arrived 3 slots early (w.r.t. local clock). Tick period too long. Shorten.
+			Serial.print(" LONG ");
 
-			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync-3);
+			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync+3);
 
 			// Re-sync by waiting 3 fewer ticks before next check.
 			bitSync_ticksRemaining = 57;
@@ -708,7 +721,7 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 	Serial.print('\n');
 
 	// Combine whole cycles and fraction into scaled integer
-	unsigned long scaledCounts = (unsigned long)heartbeat_cycles * heartbeat_frac_denominator + heartbeat_frac_numerator;
+	unsigned long scaledCounts = (unsigned long)tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
 	Serial.print("  Scaled counts: ");
 	Serial.print(scaledCounts);
 	Serial.print('\n');
@@ -716,45 +729,39 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 	unsigned long updatedCounts;
 
 	if (expectedTicks < 8000) {
+		// Make a linear update -- won't overflow 32 bits.
 		updatedCounts = (((unsigned long)scaledCounts) * actualTicks) / expectedTicks;
 		Serial.print("  Linear update: ");
 		Serial.print(updatedCounts);
 		Serial.print('\n');
+
+		// Convert back to whole cycles and fraction.
+		tick_frac_numerator = updatedCounts % tick_frac_denominator;
+		tick_interval_cycles = updatedCounts / tick_frac_denominator;
 	}
 	else {
+		// Simple calc would overflow 32 bits.
 		// Need to implement "logarithmic" update here
 		Serial.print("  Logarithmic update: Didn't implement this yet!");
 	}
 
-	// Convert back to whole cycles and fraction.
-	uint8_t rem = updatedCounts % heartbeat_frac_denominator;
-	uint16_t quot = updatedCounts / heartbeat_frac_denominator;
-
-	Serial.print("  New period: ");
-	Serial.print(quot);
-	Serial.print(" rem. ");
-	Serial.print(rem);
-	Serial.print('\n');
-
-	heartbeat_cycles = quot;
-	heartbeat_frac_numerator = rem;
-
+	tick_interval_changed = true;
 }
 
 void flashZero(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
-		hold = 20;
-		pixels.setPixelColor(68, FLASH);
-		pixels.setPixelColor(69, FLASH);
+		hold = 24;
+		pixels.setPixelColor(68, BLUE);
+		pixels.setPixelColor(69, PURPLE);
 	}
 	else {
 		if (hold > 0)
 			hold--;
 		else {
-			pixels.setPixelColor(68, BLUE);
-			pixels.setPixelColor(69, PURPLE);
+			pixels.setPixelColor(68, OFF);
+			pixels.setPixelColor(69, OFF);
 		}
 	}
 }
@@ -763,16 +770,16 @@ void flashOne(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
-		hold = 20;
-		pixels.setPixelColor(64, FLASH);
-		pixels.setPixelColor(65, FLASH);
+		hold = 24;
+		pixels.setPixelColor(64, YELLOW);
+		pixels.setPixelColor(65, GREEN);
 	}
 	else {
 		if (hold > 0)
 			hold--;
 		else {
-			pixels.setPixelColor(64, YELLOW);
-			pixels.setPixelColor(65, GREEN);
+			pixels.setPixelColor(64, OFF);
+			pixels.setPixelColor(65, OFF);
 		}
 	}
 }
@@ -781,16 +788,16 @@ void flashFrame(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
-		hold = 20;
-		pixels.setPixelColor(60, FLASH);
-		pixels.setPixelColor(61, FLASH);
+		hold = 24;
+		pixels.setPixelColor(60, RED);
+		pixels.setPixelColor(61, ORANGE);
 	}
 	else {
 		if (hold > 0)
 			hold--;
 		else {
-			pixels.setPixelColor(60, RED);
-			pixels.setPixelColor(61, ORANGE);
+			pixels.setPixelColor(60, OFF);
+			pixels.setPixelColor(61, OFF);
 		}
 	}
 }
@@ -1160,7 +1167,7 @@ void setTubePwm(uint8_t value) {
 void configureTimers() {
 
 	// Configure timer 1 to interrupt at 60Hz
- 	OCR1A = heartbeat_cycles;
+ 	OCR1A = tick_interval_cycles;
 
 	TCCR1A = 0;
     // Mode 4, CTC on OCR1A, prescaler 8
@@ -1178,24 +1185,24 @@ void configureTimers() {
 
 // Heartbeat interrupt.
 ISR (TIMER1_COMPA_vect) {
-	// Current fractional period index. Counts from 0 to heartbeat_frac_denominator-1.
-	// When heartbeat_period < heartbeat_frac_numerator, set counter for a long
-	// period of heartbeat_cycles+1 counts; otherwise, a short period of heartbeat_cycles.
+	// Current fractional period index. Counts from 0 to tick_frac_denominator-1.
+	// When heartbeat_period < tick_frac_numerator, set counter for a long
+	// period of tick_interval_cycles+1 counts; otherwise, a short period of tick_interval_cycles.
 	static uint8_t fraction_counter = 0;
 
-	if (++fraction_counter >= heartbeat_frac_denominator)
+	if (++fraction_counter >= tick_frac_denominator)
 		fraction_counter = 0;
 
 	// Reset the CTC value. For a short period, count CTC_value cycles;
 	// for a long period, count CTC_value+1. 
     // Set compare value for a short or long cycle. Must set OCR1A to n-1.
-	if (fraction_counter < heartbeat_frac_numerator) {
+	if (fraction_counter < tick_frac_numerator) {
 		// Long period: n+1-1
-		OCR1A = heartbeat_cycles;
+		OCR1A = tick_interval_cycles;
 	}
 	else {
 		// Short period: n-1
-		OCR1A = heartbeat_cycles-1;
+		OCR1A = tick_interval_cycles-1;
 	}
 
 	tick();
