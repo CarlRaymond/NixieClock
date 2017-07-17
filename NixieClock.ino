@@ -318,8 +318,12 @@ void loop() {
 		Serial.print("Decoded time (UTC): ");
 		Serial.print(tod_hours);
 		Serial.print(':');
+		if (tod_minutes < 10)
+			Serial.print('0');
 		Serial.print(tod_minutes);
 		Serial.print(':');
+		if (tod_seconds < 10)
+			Serial.print('0');
 		Serial.print(tod_seconds);
 		Serial.print('\n');
 	}
