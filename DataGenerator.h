@@ -8,15 +8,15 @@
 class DataGenerator {
 
 	public:
-		DataGenerator(uint8_t *pattern, int length, int noiselevel);
+		DataGenerator(uint8_t *pattern, size_t length, int noiselevel);
 
-		uint8_t NextBit();
+		uint8_t nextBit();
 
 	private:
 		// Symbol pattern supplied in constructor
 		uint8_t *pattern;
 		// Length of pattern
-		int length;
+		size_t length;
 
 		// Current position within the supplied pattern
 		int position;
@@ -28,8 +28,8 @@ class DataGenerator {
 		uint8_t high_count;
 		uint8_t low_count;
 
-		void SetCounts(uint8_t symbol);
+		void setCounts(uint8_t symbol);
 
-		uint8_t Noisy(uint8_t);
+		uint8_t noisy(uint8_t);
 
 };
