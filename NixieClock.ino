@@ -162,12 +162,12 @@ const uint32_t PINK = pixels.Color(60, 0, 10);
 const uint32_t FLASH = pixels.Color(255, 128, 128);
 
 // Six bytes of data for nixies
-uint8_t nixieData[6];
+volatile uint8_t nixieData[6];
 
 // 80-bit long shift register for input samples.
 // Offset 0, bit 0 has most recent sample bit; offset 9 bit 7
 // has oldest sample bit. Shifts left. 
-uint8_t volatile samples[10];
+volatile uint8_t samples[10];
 
 // Correlation template for a zero bit, including the trailing 0s of the preceding symbol,
 // and the leading 1s of the following symbol. From head end to tail end:
@@ -193,28 +193,34 @@ ScoreBoard scoreboard_frame = ScoreBoard();
 
 // Decoded symbol stream. New symbols are shifted into position 59, and move
 // toward 0. This makes the receved word symbol positions match the documentation
-// for WWVB, where bit 0 is longest ago, and bit 59 is most recent.
+// for WWVB (i.e., Wikipedia), where bit 0 is longest ago, and bit 59 is most recent.
 char symbolStream[60];
 
 // Set true by shiftSymbol; watched by main loop;
 volatile bool valid_frame = false;
 
 // Current time of day, UTC
-unsigned short volatile tod_ticks = 0;
-unsigned short volatile tod_seconds = 0;
-unsigned short volatile tod_minutes = 24;
-unsigned short volatile tod_hours = 11;
-unsigned int volatile tod_day = 0;
-unsigned int volatile tod_year = 0;
-unsigned int volatile tod_TZoffset = -4;
-bool volatile tod_isdst = true;
-bool volatile tod_isleapminute = false;
-bool volatile tod_isleapyear = false;
-bool volatile tod_changed = false;
+volatile unsigned short tod_ticks = 0;
+volatile unsigned short tod_seconds = 0;
+volatile unsigned short tod_minutes = 0;
+volatile unsigned short tod_hours = 0;
+volatile unsigned int tod_day = 0;
+volatile unsigned int tod_year = 0;
+volatile bool tod_isdst = true;
+volatile bool tod_isleapminute = false;
+volatile bool tod_isleapyear = false;
+volatile bool tod_changed = false;
+
+// Set true when time has been decoded
+volatile bool tod_fix = false;
+
+// Set your time zone here!
+int8_t tzOffsetHours = -4;
+int8_t tzOffsetMinutes = 0;
 
 // Operating modes
-const uint8_t MODE_BITSEEK = 0;
-const uint8_t MODE_BITSYNC = 1;
+const uint8_t MODE_SEEK = 0;
+const uint8_t MODE_SYNC = 1;
 
 // Current operating mode. Don't directly write it; call setMode().
 volatile uint8_t mode;
@@ -239,7 +245,7 @@ void setup() {
 
 	// HV power supply
 	pinMode(PIN_HV, OUTPUT);
-	digitalWrite(PIN_HV, HIGH); // HV off
+	digitalWrite(PIN_HV, LOW); // HV on
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
@@ -279,11 +285,17 @@ void setup() {
 	//test_showPatterns();
 	//test_shifter();
 
-	setMode(MODE_BITSEEK);
+	setMode(MODE_SEEK);
 
 	//adjustTickInterval(997L, 1000L);
 	//adjustTickInterval(1997L, 2000L);
 	//adjustTickInterval(7997L, 8000L);
+
+	setHours(23);
+	setMinutes(49);
+	setSeconds(49);
+	updateNixies();
+
 }
 
 
@@ -314,24 +326,19 @@ void loop() {
 
 		// Set time of day from the symbol frame, taking processing time offset into account.
 		decodeTimeOfDay(14);
+		tod_fix = true;
 
-		Serial.print("Decoded time (UTC): ");
-		Serial.print(tod_hours);
-		Serial.print(':');
-		if (tod_minutes < 10)
-			Serial.print('0');
-		Serial.print(tod_minutes);
-		Serial.print(':');
-		if (tod_seconds < 10)
-			Serial.print('0');
-		Serial.print(tod_seconds);
-		Serial.print('\n');
+		printTimeUtc();
 	}
 
 	if (tod_changed) {
-		tod_changed = false;
-		updateTimeOfDayLocal();
+		if (tod_fix)
+			updateTimeOfDayLocal(tzOffsetHours, tzOffsetMinutes, true);
+		else
+			updateTimeOfDayUtc();
+
 		updateNixies();
+		tod_changed = false;
 	}
 
 	if (tick_interval_changed) {
@@ -349,11 +356,11 @@ void loop() {
 		mode_changed = false;
 		Serial.print("Mode changed to ");
 		switch(mode) {
-			case MODE_BITSEEK:
-				Serial.print("MODE_BITSEEK");
+			case MODE_SEEK:
+				Serial.print("MODE_SEEK");
 				break;
-			case MODE_BITSYNC:
-				Serial.print("MODE_BITSYNC");
+			case MODE_SYNC:
+				Serial.print("MODE_SYNC");
 				break;
 
 			default:
@@ -452,7 +459,6 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 // Invoked at 60Hz by ISR. Samples incoming data bits, and processes them through the discriminators.
 void tick() {
-
 	// Set heartbeat pin high
 	PORTD |= B00000100;
 
@@ -474,11 +480,11 @@ void tick() {
 	pixels.show();
 
 	switch (mode) {
-		case MODE_BITSEEK:
+		case MODE_SEEK:
 			bitSeek();
 			break;
 
-		case MODE_BITSYNC:
+		case MODE_SYNC:
 			bitSync();
 			break;
 	}
@@ -487,7 +493,7 @@ void tick() {
 	flashOne(score_ONE);
 	flashFrame(score_FRAME);
 
-	//printScores(score_ZERO, score_ONE, score_FRAME);
+	// printScores(score_ZERO, score_ONE, score_FRAME);
 
 	// Update running time
 	tickTime();
@@ -510,11 +516,11 @@ void sampleToRing(uint8_t sample) {
 	pixels.setPixelColor(pixelIndex, SAMPLE_CURSOR);
 }
 
-// Variables for MODE_BITSEEK
+// Variables for MODE_SEEK
 uint8_t bitSeek_matchCount = 0;
 int bitSeek_tickCount = 0;
 
-// Variables for MODE_BITSYNC
+// Variables for MODE_SYNC
 uint8_t bitSync_ticksRemaining = 60;
 long bitSync_ticksSinceSync;
 uint8_t bitSync_dropCountdown = 30;
@@ -522,14 +528,14 @@ uint8_t bitSync_dropCountdown = 30;
 // Changes the operating mode, updating necessary variables.
 void setMode(uint8_t newMode) {
 	switch (newMode) {
-		case MODE_BITSEEK:
+		case MODE_SEEK:
 			// Reset counters
 			bitSeek_matchCount = 0;
 			bitSeek_tickCount = 0;
 			setColonColor(PINK);
 			break;
 
-		case MODE_BITSYNC:
+		case MODE_SYNC:
 			bitSync_ticksRemaining = 60;
 			bitSync_ticksSinceSync = 0;
 			bitSync_dropCountdown = 30;
@@ -541,7 +547,7 @@ void setMode(uint8_t newMode) {
 	mode_changed = true;
 }
 
-// Invoked on each tick when in MODE_BITSEEK. Look for 6 consecutive successful bits. If a bit
+// Invoked on each tick when in MODE_SEEK. Look for 6 consecutive successful bits. If a bit
 // interval elapses without a bit, reset the match count to 0.
 void bitSeek() {
 	uint8_t maxScore;
@@ -582,14 +588,14 @@ void bitSeek() {
 	if (bitSeek_matchCount == 6) {
 		Serial.print("Found 6 consecutive symbols.\n");
 
-		setMode(MODE_BITSYNC);
+		setMode(MODE_SYNC);
 	}
 }
 
-// Invoked on each tich when in MODE_BITSYNC. Let 60 ticks elapse, and look for a
+// Invoked on each tich when in MODE_SYNC. Let 60 ticks elapse, and look for a
 // symbol match. If max scores slot index changes, indicating drift, recalibrate the tick
 // time interval.
-// If we fail to see a symbol for 30 counts, switch back to MODE_BITSEEK.
+// If we fail to see a symbol for 30 seconds, switch back to MODE_SEEK.
 void bitSync() {
 
 	bitSync_ticksSinceSync++;
@@ -616,7 +622,7 @@ void bitSync() {
 		// No symbol seen.
 		shiftSymbol('X');
 		if (--bitSync_dropCountdown) {
-			setMode(MODE_BITSEEK);
+			setMode(MODE_SEEK);
 		}
 		return;
 	}
@@ -914,61 +920,22 @@ int score(uint8_t *pattern) {
 	return sum;
 }
 
-// Locates the peak position in a score buffer. A peak means while scanning over the buffer, scores are first
-// increasing (really non-decreasing) to a value above the threshold, and then decreasing (really non-increasing)
-// thereafter. If all scores are below the threshold, returns false; otherwise, returns true, and the peak position
-// is passed out in pos_out.
-bool hasPeak(unsigned short *buffer, short int length, int *pos_out) {
-	short int pos = 1;
-
-	// Find max value and position
-	short int max_pos = 0;
-    short int max_val = buffer[0];
-	for (int i=1;  i < length;  i++) {
-		if (buffer[i] > max_val) {
-			max_val = buffer[i];
-			max_pos = i;
-		}
-	}
-
-	if (max_val < scoreThreshold)
-		return false;
-
-	// Non-increasing toward pos 0?
-	if (max_pos == 0)
-		return false;
-	short int prior = max_val;
-	short int current;
-	for (int i = max_pos - 1;  i>=0;  i--) {
-		current = buffer[i];
-		if (current > prior)
-			return false;
-		prior = current;
-	}
-
-	// Non-increasing toward pos n?
-	if (max_pos == length-1)
-		return false;
-	prior = max_val;
-	for (int i = max_pos + 1;  i>length;  i++) {
-		current = buffer[i];
-		if (current > prior)
-			return false;
-		prior = current;
-	}
-	
-	*pos_out = max_pos;
-	return true;
-}
-
 // Increment the time of day
 void tickTime() {
 
 	tod_ticks++;
+
+	// Blank time on the half-second when we haven't got a time fix
+	if (!tod_fix && tod_ticks > 45) {
+		resetNixies();
+		updateNixies();
+	}
+
 	if (tod_ticks < 60)
 		return;
 
 	tod_changed = true;
+
 	tod_ticks = 0;
 	tod_seconds++;
 	
@@ -1004,38 +971,6 @@ void tickTime() {
 
 }
 
-// Print the scores over the serial port.
-void printScores(uint8_t zero, uint8_t one, uint8_t frame) {
-	static bool separated = false;
-	if (zero > scoreThreshold || one > scoreThreshold || frame > scoreThreshold) {
-		Serial.print(zero);
-		if (zero > scoreThreshold)
-			Serial.print("**  ");
-		else
-			Serial.print("    ");
-	
-		Serial.print(one);
-		if (one > scoreThreshold)
-			Serial.print("**  ");
-		else
-			Serial.print("    ");
-
-		Serial.print(frame);
-		if (frame > scoreThreshold)
-			Serial.print("**\n");
-		else
-			Serial.print("\n");
-
-		separated = false;
-	}
-	else {
-		if (!separated) {
-			Serial.print("----------\n");
-			separated = true;
-		}
-	}
-}
-
 void setColonColor(uint32_t color) {
 	pixels.setPixelColor(62, color);
 	pixels.setPixelColor(63, color);
@@ -1047,22 +982,60 @@ void setColonColor(uint32_t color) {
 // Set the current time of day on the hours, minutes, and seconds digits, 
 // using UTC.
 void updateTimeOfDayUtc() {
-	setSeconds(tod_seconds);
-	setMinutes(tod_minutes);
 	setHours(tod_hours);
+	setMinutes(tod_minutes);
+	setSeconds(tod_seconds);
 }
 
 // Set current local time of day on the hours, minutes and seconds digits.
-void updateTimeOfDayLocal() {
+void updateTimeOfDayLocal(int8_t hoursOffset, int8_t minutesOffset, bool AMPM) {
 
-	unsigned short local_hours = tod_hours + tod_TZoffset;
-	if (local_hours > 23) {
-		local_hours -= 23;
+	int16_t local_day = tod_day;
+	int8_t local_hours = tod_hours + hoursOffset;
+	int8_t local_minutes = tod_minutes + minutesOffset;
+	int16_t local_year = tod_year;
+
+	if (local_minutes > 59) {
+		local_minutes -= 60;
+		local_hours++;
+	}
+	else if (local_minutes < 0) {
+		local_minutes += 60;
+		local_hours--;
 	}
 
-	setSeconds(tod_seconds);
-	setMinutes(tod_minutes);
+	if (local_hours > 23) {
+		local_day++;
+		local_hours -= 24;
+	}
+	else if (local_hours < 0) {
+		local_hours += 24;
+		local_day--;
+	}
+
+	int days_in_year = 365;
+	if (tod_isleapyear)
+		days_in_year = 366;
+	if (local_day > days_in_year) {
+		local_day -= days_in_year;
+		local_year++;
+	}
+	else if (local_day < 1) {
+		local_day += days_in_year;
+		local_year--;
+	}
+
+	// Display in 12 hour format?
+	if (AMPM) {
+		if (local_hours > 12)
+			local_hours -= 12;
+		if (local_hours == 0)
+			local_hours = 12;
+	}
+
 	setHours(local_hours);
+	setMinutes(local_minutes);
+	setSeconds(tod_seconds);
 }
 
 // Send current nixie data
@@ -1245,8 +1218,53 @@ void printSymbols() {
 	Serial.print('\n');
 }
 
-void test_showPatterns() {
+// Print the scores over the serial port.
+void printScores(uint8_t zero, uint8_t one, uint8_t frame) {
+	static bool separated = false;
+	if (zero > scoreThreshold || one > scoreThreshold || frame > scoreThreshold) {
+		Serial.print(zero);
+		if (zero > scoreThreshold)
+			Serial.print("**  ");
+		else
+			Serial.print("    ");
+	
+		Serial.print(one);
+		if (one > scoreThreshold)
+			Serial.print("**  ");
+		else
+			Serial.print("    ");
 
+		Serial.print(frame);
+		if (frame > scoreThreshold)
+			Serial.print("**\n");
+		else
+			Serial.print("\n");
+
+		separated = false;
+	}
+	else {
+		if (!separated) {
+			Serial.print("----------\n");
+			separated = true;
+		}
+	}
+}
+
+void printTimeUtc() {
+		Serial.print("Time of day (UTC): ");
+		Serial.print(tod_hours);
+		Serial.print(':');
+		if (tod_minutes < 10)
+			Serial.print('0');
+		Serial.print(tod_minutes);
+		Serial.print(':');
+		if (tod_seconds < 10)
+			Serial.print('0');
+		Serial.print(tod_seconds);
+		Serial.print('\n');
+}
+
+void test_showPatterns() {
 	Serial.print("SYMBOL_ZERO: ");
 	Serial.print(SYMBOL_ZERO[9], BIN);
 	Serial.print(' ');
