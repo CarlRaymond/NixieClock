@@ -184,7 +184,7 @@ uint8_t SYMBOL_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f,
 uint8_t SYMBOL_FRAME[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
-uint8_t scoreThreshold = 70;
+uint8_t scoreThreshold = 68;
 
 // Score history buffers
 ScoreBoard scoreboard_zero = ScoreBoard();
@@ -286,16 +286,6 @@ void setup() {
 	//test_shifter();
 
 	setMode(MODE_SEEK);
-
-	//adjustTickInterval(997L, 1000L);
-	//adjustTickInterval(1997L, 2000L);
-	//adjustTickInterval(7997L, 8000L);
-
-	setHours(23);
-	setMinutes(49);
-	setSeconds(49);
-	updateNixies();
-
 }
 
 
@@ -522,8 +512,9 @@ int bitSeek_tickCount = 0;
 
 // Variables for MODE_SYNC
 uint8_t bitSync_ticksRemaining = 60;
-long bitSync_ticksSinceSync;
-uint8_t bitSync_dropCountdown = 30;
+uint32_t bitSync_ticksSinceSync = 0;
+// Seconds without a bit received remaining before dropping sync
+uint8_t bitSync_syncTimeout = 30;
 
 // Changes the operating mode, updating necessary variables.
 void setMode(uint8_t newMode) {
@@ -537,8 +528,8 @@ void setMode(uint8_t newMode) {
 
 		case MODE_SYNC:
 			bitSync_ticksRemaining = 60;
-			bitSync_ticksSinceSync = 0;
-			bitSync_dropCountdown = 30;
+			bitSync_ticksSinceSync = 0L;
+			bitSync_syncTimeout = 30;
 			setColonColor(BLUE);
 			break;
 	}
@@ -608,23 +599,24 @@ void bitSync() {
 
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
 		shiftSymbol('0');
-		bitSync_dropCountdown = 30;
+		bitSync_syncTimeout = 30;
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
 		shiftSymbol('1');
-		bitSync_dropCountdown = 30;
+		bitSync_syncTimeout = 30;
 	}
 	else if (scoreboard_frame.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
 		shiftSymbol('F');
-		bitSync_dropCountdown = 30;
+		bitSync_syncTimeout = 30;
 	}
 	else {
 		// No symbol seen.
 		shiftSymbol('X');
-		if (--bitSync_dropCountdown) {
+		if (--bitSync_syncTimeout == 0) {
+			// Sync dropped.
 			setMode(MODE_SEEK);
+			return;
 		}
-		return;
 	}
 
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
@@ -668,10 +660,10 @@ void bitSync() {
 void shiftSymbol(char newSymbol) {
 	uint8_t score = 0;
 
-//	Serial.print("Shifting ");
-//	Serial.print(newSymbol);
-//	Serial.print('\n');
-//	printSymbols();
+	Serial.print("Shifting ");
+	Serial.print(newSymbol);
+	Serial.print('\n');
+	printSymbols();
 
 	// Single loop for shifting and scoring. Only check that positions that should have
 	// frame symbol have them, and that non-frame positions do not.
