@@ -32,7 +32,7 @@
 // frame. Each is a pulse of duration 1 second with a varying pulse width.
 // ZERO: 0.2s high, 0.8s low
 // ONE: 0.5s high, 0.5s low
-// FRAME: 0.8s high, 0.2s low
+// MARKER: 0.8s high, 0.2s low
 // 
 // The incoming bitstream is sampled at 60 Hz, and and samples are transferred to a shift register.
 // Symbols are detected by comparing the stored samples with ideal templates of
@@ -179,9 +179,9 @@ uint8_t SYMBOL_ZERO[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x3f
 // Correlaton template for one bit. From head to tail:
 // 10 0s, 30 1s, 30 0s, 10 1s
 uint8_t SYMBOL_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f, 0x00 };
-// Correlation template for frame bit. From head to tail:
+// Correlation template for marker bit. From head to tail:
 // 10 0s, 48 1s, 12 0s, 10 1s
-uint8_t SYMBOL_FRAME[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
+uint8_t SYMBOL_MARKER[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
 uint8_t scoreThreshold = 68;
@@ -189,7 +189,7 @@ uint8_t scoreThreshold = 68;
 // Score history buffers
 ScoreBoard scoreboard_zero = ScoreBoard();
 ScoreBoard scoreboard_one = ScoreBoard();
-ScoreBoard scoreboard_frame = ScoreBoard();
+ScoreBoard scoreboard_marker = ScoreBoard();
 
 // Decoded symbol stream. New symbols are shifted into position 59, and move
 // toward 0. This makes the receved word symbol positions match the documentation
@@ -228,12 +228,12 @@ volatile bool mode_changed = false;
 
 // Prepare some fake data.  This represents 10:35am June 1, 2017.
 uint8_t fakedata[] = {
-	FRAME,	ZERO,	ONE,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ONE,	FRAME,  // 0-9
-	ZERO,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	FRAME,	// 10-19
-	ZERO,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ONE,	FRAME,	// 20-29
-	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ZERO,	ZERO,	ONE,	ZERO,	FRAME,	// 30-39
-	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ONE,	FRAME,	// 40-49
-	ZERO,	ONE,	ONE,	ONE,	ZERO,	ZERO,	ZERO,	ONE,	ONE,	FRAME	// 50-59
+	MARKER,	ZERO,	ONE,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ONE,	MARKER,  // 0-9
+	ZERO,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	MARKER,	// 10-19
+	ZERO,	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ONE,	ZERO,	ONE,	MARKER,	// 20-29
+	ZERO,	ZERO,	ONE,	ZERO,	ZERO,	ZERO,	ZERO,	ONE,	ZERO,	MARKER,	// 30-39
+	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ZERO,	ONE,	MARKER,	// 40-49
+	ZERO,	ONE,	ONE,	ONE,	ZERO,	ZERO,	ZERO,	ONE,	ONE,	MARKER	// 50-59
 };
 DataGenerator fake_frame = DataGenerator(fakedata, sizeof(fakedata), 0);
 
@@ -361,6 +361,337 @@ void loop() {
 	}
 }
 
+// Invoked at 60Hz by ISR. Samples incoming data bits, and processes them through the discriminators.
+void tick() {
+	// Set heartbeat pin high
+	PORTD |= B00000100;
+
+	// Sample the input - port D bit 7
+	//bool input = (PORTD & B00000001) >> 7;
+	uint8_t input = digitalRead(PIN_WWVB);
+	//uint8_t input = fake_frame.nextBit();
+	shiftSample(input);
+
+	uint8_t score_ZERO = score(SYMBOL_ZERO);
+	scoreboard_zero.shiftScore(score_ZERO);
+	uint8_t score_ONE = score(SYMBOL_ONE);
+	scoreboard_one.shiftScore(score_ONE);
+	uint8_t score_MARKER = score(SYMBOL_MARKER);
+	scoreboard_marker.shiftScore(score_MARKER);
+
+	sampleToRing(input);
+
+	pixels.show();
+
+	switch (mode) {
+		case MODE_SEEK:
+			bitSeek();
+			break;
+
+		case MODE_SYNC:
+			bitSync();
+			break;
+	}
+
+	flashZero(score_ZERO);
+	flashOne(score_ONE);
+	flashMarker(score_MARKER);
+
+	// printScores(score_ZERO, score_ONE, score_MARKER);
+
+	// Update running time
+	tickTime();
+
+	// Set heartbeat pin low
+	PORTD &= B11111011;
+}
+
+// Show incoming data sample in the ring
+void sampleToRing(uint8_t sample) {
+	// Indicates the active pixel
+	static uint8_t pixelIndex = 0;
+
+	if (sample)
+		pixels.setPixelColor(pixelIndex, SAMPLE_ONE);
+	else
+		pixels.setPixelColor(pixelIndex, SAMPLE_ZERO);
+	if (++pixelIndex >= 60)
+		pixelIndex = 0;
+	pixels.setPixelColor(pixelIndex, SAMPLE_CURSOR);
+}
+
+// Variables for MODE_SEEK
+uint8_t bitSeek_matchCount = 0;
+int bitSeek_tickCount = 0;
+
+// Variables for MODE_SYNC
+uint8_t bitSync_ticksRemaining = 60;
+uint32_t bitSync_ticksSinceSync = 0;
+// Seconds without a bit received remaining before dropping sync
+uint8_t bitSync_syncTimeout = 6;
+
+// Changes the operating mode, updating necessary variables.
+void setMode(uint8_t newMode) {
+	switch (newMode) {
+		case MODE_SEEK:
+			// Reset counters
+			bitSeek_matchCount = 0;
+			bitSeek_tickCount = 0;
+			setColonColor(PINK);
+			break;
+
+		case MODE_SYNC:
+			bitSync_ticksRemaining = 60;
+			bitSync_ticksSinceSync = 0L;
+			bitSync_syncTimeout = 6;
+			setColonColor(BLUE);
+			break;
+	}
+
+	mode = newMode;
+	mode_changed = true;
+}
+
+// Invoked on each tick when in MODE_SEEK. Look for 6 consecutive successful bits. If a bit
+// interval elapses without a bit, reset the match count to 0.
+void bitSeek() {
+	uint8_t maxScore;
+	uint8_t maxIndex;
+
+	static uint8_t timeout = 65;
+	bitSeek_tickCount++;
+
+	if (--timeout == 0) {
+		// No bit seen. Reset.
+		bitSeek_matchCount = 0;
+		timeout = 60;
+	}
+
+	// A successful bit has peak in middle slot of 7
+	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+		if (maxIndex == 3) {
+			bitSeek_matchCount++;
+			timeout = 65;
+			shiftSymbol('0');
+		}
+	}
+	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+		if (maxIndex == 3) {
+			bitSeek_matchCount++;
+			timeout = 65;
+			shiftSymbol('1');
+		}
+	}
+	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+		if (maxIndex == 3) {
+			bitSeek_matchCount++;
+			timeout = 65;
+			shiftSymbol('M');
+		}
+	}
+
+	if (bitSeek_matchCount == 6) {
+		Serial.print("Found 6 consecutive symbols.\n");
+
+		setMode(MODE_SYNC);
+	}
+}
+
+// Invoked on each tich when in MODE_SYNC. Let 60 ticks elapse, and look for a
+// symbol match. If max scores slot index changes, indicating drift, recalibrate the tick
+// time interval.
+// If we fail to see a symbol for 30 seconds, switch back to MODE_SEEK.
+void bitSync() {
+
+	bitSync_ticksSinceSync++;
+	if (--bitSync_ticksRemaining > 0)
+		return;
+
+	// Look for next symbol.
+	uint8_t maxScore = 0;
+	uint8_t maxIndex = 3;
+
+	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+		shiftSymbol('0');
+		bitSync_syncTimeout = 6;
+	}
+	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+		shiftSymbol('1');
+		bitSync_syncTimeout = 6;
+	}
+	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+		shiftSymbol('M');
+		bitSync_syncTimeout = 6;
+	}
+	else {
+		// No symbol seen.
+		shiftSymbol('X');
+		if (--bitSync_syncTimeout == 0) {
+			// Sync dropped.
+			setMode(MODE_SEEK);
+			return;
+		}
+	}
+
+	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
+	// in a different slot means the local oscillator is running fast or slow compared
+	// to the reference.  When we have accumulated 3 ticks of drift, update the
+	// tick interval timer accordingly.  Waiting until 3 ticks prevents updating
+	// too often.
+	switch (maxIndex) {
+		case 0:
+			// Symbol arrived 3 slots late (w.r.t. local clock -- we're fast). Tick period too short. Lengthen.
+			Serial.print(" SHORT ");
+
+			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync-3);
+
+			// Re-sync by waiting 3 more ticks before next check.
+			bitSync_ticksRemaining = 63;
+			bitSync_ticksSinceSync = 0L;
+			break;
+
+		case 6:
+			// Symbol arrived 3 slots early (w.r.t. local clock). Tick period too long. Shorten.
+			Serial.print(" LONG ");
+
+			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync+3);
+
+			// Re-sync by waiting 3 fewer ticks before next check.
+			bitSync_ticksRemaining = 57;
+			bitSync_ticksSinceSync = 0L;
+			break;
+
+		default:
+			// Symbol peak found within +- 2 ticks of expected. That's OK.
+			bitSync_ticksRemaining = 60;
+	}
+
+}
+
+
+void shiftSymbol(char newSymbol) {
+	uint8_t score = 0;
+
+	Serial.print("Shifting ");
+	Serial.print(newSymbol);
+	Serial.print('\n');
+
+	// Single loop for shifting and scoring. Only check that positions that should have
+	// marker symbol have them, and that non-marker positions do not.
+
+	// When markerPos = 0, we're shifting into a marker position. It gets reset to 9
+	// after processing a marker position.
+	uint8_t markerPosCountdown = 10;
+	for (uint8_t i=0;  i<59;  i++) {
+		markerPosCountdown--;
+		char symbol = symbolStream[i+1];
+		symbolStream[i] = symbol;
+		if (i == 0) {
+			// Should be a marker symbol.
+			if (symbol == 'M')
+				score++;
+		}
+		if (markerPosCountdown == 0) {
+			// Should be a marker symbol.
+			if (symbol == 'M')
+				score++;
+			markerPosCountdown = 10;
+		}
+		else {
+			// Should be a 1 or 0.
+			if (symbol == '0'  ||  symbol == '1')
+				score++;
+		}
+	}
+
+	symbolStream[59] = newSymbol;
+	if (newSymbol == 'M' )
+		score++;
+
+
+	printSymbols();
+
+	if (score == 60) {
+		valid_frame = true;
+	}
+}
+
+
+
+
+// Udpate the tick interval to compensate for counting actualTicks while
+// expecting to count expectedTicks.  Both parameters should be near each
+// other (+-3). When they are above 8000, the math would overflow a 32-bit
+// integer, so an alternate technique is needed.
+void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) {
+
+	Serial.print("Adjusting tick interval\n  Actual ticks: ");
+	Serial.print(actualTicks);
+	Serial.print('\n');
+	Serial.print("  Expected ticks: ");
+	Serial.print(expectedTicks);
+	Serial.print('\n');
+
+	// Combine whole cycles and fraction into scaled integer
+	unsigned long scaledCounts = (unsigned long)tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
+	Serial.print("  Scaled counts: ");
+	Serial.print(scaledCounts);
+	Serial.print('\n');
+
+	unsigned long updatedCounts;
+
+	if (expectedTicks < 4096) {
+		// Make a linear update -- won't overflow 32 bits.
+		updatedCounts = (((unsigned long)scaledCounts) * actualTicks) / expectedTicks;
+		Serial.print("  Linear update: ");
+		Serial.print(updatedCounts);
+		Serial.print('\n');
+
+	}
+	else {
+		// Simple calc above would overflow 32 bits.
+		// Perform "logarithmic" update: based on the denominator, find the (single)
+		// bit position to twiddle that will move the count toward the desired
+		// value without overshooting.
+		// We're adjusting scaledCounts by a multiplier, 1+(k/d), where d = expectedTicks,
+		// and k = actualTicks - expectedTicks. (By nature of the sync process, k will be a small integer.)
+		// Treat scaledCounts as a 20-bit value, and find the bit position corresponding to 
+		// multiplying by 1/d -- the position where twiddling will adjust the result by not more
+		// than scaledCounts * 1/d.  Multiply that by k, and add to scaledCounts.
+
+		uint8_t d = 0;
+		if (expectedTicks < 8192)
+			d = 128;
+		else if (expectedTicks < 16384)
+			d = 64;
+		else if (expectedTicks < 32768)
+			d = 32;
+		else if (expectedTicks < 65536)
+			d = 16;
+		else if (expectedTicks < 131072)
+			d = 8;
+		else if (expectedTicks < 262144)
+			d = 4;
+		else if (expectedTicks < 524288)
+			d = 2;
+		else
+			d = 1;
+
+		long k = actualTicks - expectedTicks;
+		updatedCounts = scaledCounts + (d*k);
+				 
+		Serial.print("  Logarithmic update: ");
+		Serial.print(updatedCounts);
+		Serial.print('\n');
+	}
+
+	// Convert back to whole cycles and fraction.
+	tick_frac_numerator = updatedCounts % tick_frac_denominator;
+	tick_interval_cycles = updatedCounts / tick_frac_denominator;
+
+	tick_interval_changed = true;
+}
+
 void decodeTimeOfDay(uint8_t ticksDelta) {
 
 	// Decode the symbol word in the buffer, and set the time. Adjust by the tickDelta value.
@@ -447,309 +778,6 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 }
 
-// Invoked at 60Hz by ISR. Samples incoming data bits, and processes them through the discriminators.
-void tick() {
-	// Set heartbeat pin high
-	PORTD |= B00000100;
-
-	// Sample the input - port D bit 7
-	//bool input = (PORTD & B00000001) >> 7;
-	uint8_t input = digitalRead(PIN_WWVB);
-	//uint8_t input = fake_frame.nextBit();
-	shiftSample(input);
-
-	uint8_t score_ZERO = score(SYMBOL_ZERO);
-	scoreboard_zero.shiftScore(score_ZERO);
-	uint8_t score_ONE = score(SYMBOL_ONE);
-	scoreboard_one.shiftScore(score_ONE);
-	uint8_t score_FRAME = score(SYMBOL_FRAME);
-	scoreboard_frame.shiftScore(score_FRAME);
-
-	sampleToRing(input);
-
-	pixels.show();
-
-	switch (mode) {
-		case MODE_SEEK:
-			bitSeek();
-			break;
-
-		case MODE_SYNC:
-			bitSync();
-			break;
-	}
-
-	flashZero(score_ZERO);
-	flashOne(score_ONE);
-	flashFrame(score_FRAME);
-
-	// printScores(score_ZERO, score_ONE, score_FRAME);
-
-	// Update running time
-	tickTime();
-
-	// Set heartbeat pin low
-	PORTD &= B11111011;
-}
-
-// Show incoming data sample in the ring
-void sampleToRing(uint8_t sample) {
-	// Indicates the active pixel
-	static uint8_t pixelIndex = 0;
-
-	if (sample)
-		pixels.setPixelColor(pixelIndex, SAMPLE_ONE);
-	else
-		pixels.setPixelColor(pixelIndex, SAMPLE_ZERO);
-	if (++pixelIndex >= 60)
-		pixelIndex = 0;
-	pixels.setPixelColor(pixelIndex, SAMPLE_CURSOR);
-}
-
-// Variables for MODE_SEEK
-uint8_t bitSeek_matchCount = 0;
-int bitSeek_tickCount = 0;
-
-// Variables for MODE_SYNC
-uint8_t bitSync_ticksRemaining = 60;
-uint32_t bitSync_ticksSinceSync = 0;
-// Seconds without a bit received remaining before dropping sync
-uint8_t bitSync_syncTimeout = 30;
-
-// Changes the operating mode, updating necessary variables.
-void setMode(uint8_t newMode) {
-	switch (newMode) {
-		case MODE_SEEK:
-			// Reset counters
-			bitSeek_matchCount = 0;
-			bitSeek_tickCount = 0;
-			setColonColor(PINK);
-			break;
-
-		case MODE_SYNC:
-			bitSync_ticksRemaining = 60;
-			bitSync_ticksSinceSync = 0L;
-			bitSync_syncTimeout = 30;
-			setColonColor(BLUE);
-			break;
-	}
-
-	mode = newMode;
-	mode_changed = true;
-}
-
-// Invoked on each tick when in MODE_SEEK. Look for 6 consecutive successful bits. If a bit
-// interval elapses without a bit, reset the match count to 0.
-void bitSeek() {
-	uint8_t maxScore;
-	uint8_t maxIndex;
-
-	static uint8_t timeout = 65;
-	bitSeek_tickCount++;
-
-	if (--timeout == 0) {
-		// No bit seen. Reset.
-		bitSeek_matchCount = 0;
-		timeout = 60;
-	}
-
-	// A successful bit has peak in slot 4 of 7
-	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		if (maxIndex == 4) {
-			bitSeek_matchCount++;
-			timeout = 65;
-			shiftSymbol('0');
-		}
-	}
-	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		if (maxIndex == 4) {
-			bitSeek_matchCount++;
-			timeout = 65;
-			shiftSymbol('1');
-		}
-	}
-	else if (scoreboard_frame.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		if (maxIndex == 4) {
-			bitSeek_matchCount++;
-			timeout = 65;
-			shiftSymbol('F');
-		}
-	}
-
-	if (bitSeek_matchCount == 6) {
-		Serial.print("Found 6 consecutive symbols.\n");
-
-		setMode(MODE_SYNC);
-	}
-}
-
-// Invoked on each tich when in MODE_SYNC. Let 60 ticks elapse, and look for a
-// symbol match. If max scores slot index changes, indicating drift, recalibrate the tick
-// time interval.
-// If we fail to see a symbol for 30 seconds, switch back to MODE_SEEK.
-void bitSync() {
-
-	bitSync_ticksSinceSync++;
-	if (--bitSync_ticksRemaining > 0)
-		return;
-
-	// Look for next symbol.
-	uint8_t maxScore = 0;
-	uint8_t maxIndex = 4;
-
-	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		shiftSymbol('0');
-		bitSync_syncTimeout = 30;
-	}
-	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		shiftSymbol('1');
-		bitSync_syncTimeout = 30;
-	}
-	else if (scoreboard_frame.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		shiftSymbol('F');
-		bitSync_syncTimeout = 30;
-	}
-	else {
-		// No symbol seen.
-		shiftSymbol('X');
-		if (--bitSync_syncTimeout == 0) {
-			// Sync dropped.
-			setMode(MODE_SEEK);
-			return;
-		}
-	}
-
-	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
-	// in a different slot means the local oscillator is running fast or slow compared
-	// to the reference.  When we have accumulated 3 ticks of drift, update the
-	// tick interval timer accordingly.  Waiting until 3 ticks prevents updating
-	// too often.
-	switch (maxIndex) {
-		case 0:
-			// Symbol arrived 3 slots late (w.r.t. local clock -- we're fast). Tick period too short. Lengthen.
-			Serial.print(" SHORT ");
-
-			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync-3);
-
-			// Re-sync by waiting 3 more ticks before next check.
-			bitSync_ticksRemaining = 63;
-			bitSync_ticksSinceSync = 0L;
-			break;
-
-		case 7:
-			// Symbol arrived 3 slots early (w.r.t. local clock). Tick period too long. Shorten.
-			Serial.print(" LONG ");
-
-			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync+3);
-
-			// Re-sync by waiting 3 fewer ticks before next check.
-			bitSync_ticksRemaining = 57;
-			bitSync_ticksSinceSync = 0L;
-			break;
-
-		default:
-			// Symbol peak found within +- 2 ticks of expected. That's OK.
-			bitSync_ticksRemaining = 60;
-	}
-
-}
-
-
-
-
-void shiftSymbol(char newSymbol) {
-	uint8_t score = 0;
-
-	Serial.print("Shifting ");
-	Serial.print(newSymbol);
-	Serial.print('\n');
-	printSymbols();
-
-	// Single loop for shifting and scoring. Only check that positions that should have
-	// frame symbol have them, and that non-frame positions do not.
-
-	// When framePos = 0, we're shifting into a frame position. It gets reset to 9
-	// after processing a frame position.
-	uint8_t framePosCountdown = 10;
-	for (uint8_t i=0;  i<59;  i++) {
-		framePosCountdown--;
-		char symbol = symbolStream[i+1];
-		symbolStream[i] = symbol;
-		if (i == 0) {
-			// Should be a frame symbol.
-			if (symbol == 'F')
-				score++;
-		}
-		if (framePosCountdown == 0) {
-			// Should be a frame symbol.
-			if (symbol == 'F')
-				score++;
-			framePosCountdown = 10;
-		}
-		else {
-			// Should be a 1 or 0.
-			if (symbol == '0'  ||  symbol == '1')
-				score++;
-		}
-	}
-
-	symbolStream[59] = newSymbol;
-	if (newSymbol == 'F' )
-		score++;
-
-	//Serial.print("Symbol score: ");
-	//Serial.print(score);
-	//Serial.print('\n');
-
-	if (score == 60) {
-		valid_frame = true;
-	}
-}
-
-
-
-
-// Udpate the tick interval to compensate for counting actualTicks while
-// expecting to count expectedTicks.  Both parameters should be near each
-// other (+-3). When they are above 8000, the math would overflow a 32-bit
-// integer, so an alternate technique is needed.d
-void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) {
-
-	Serial.print("Adjusting tick interval\n  Actual ticks: ");
-	Serial.print(actualTicks);
-	Serial.print('\n');
-	Serial.print("  Expected ticks: ");
-	Serial.print(expectedTicks);
-	Serial.print('\n');
-
-	// Combine whole cycles and fraction into scaled integer
-	unsigned long scaledCounts = (unsigned long)tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
-	Serial.print("  Scaled counts: ");
-	Serial.print(scaledCounts);
-	Serial.print('\n');
-
-	unsigned long updatedCounts;
-
-	if (expectedTicks < 8000) {
-		// Make a linear update -- won't overflow 32 bits.
-		updatedCounts = (((unsigned long)scaledCounts) * actualTicks) / expectedTicks;
-		Serial.print("  Linear update: ");
-		Serial.print(updatedCounts);
-		Serial.print('\n');
-
-		// Convert back to whole cycles and fraction.
-		tick_frac_numerator = updatedCounts % tick_frac_denominator;
-		tick_interval_cycles = updatedCounts / tick_frac_denominator;
-	}
-	else {
-		// Simple calc would overflow 32 bits.
-		// Need to implement "logarithmic" update here
-		Serial.print("  Logarithmic update: Didn't implement this yet!");
-	}
-
-	tick_interval_changed = true;
-}
-
 void flashZero(int score) {
 	static int hold = 0;
 
@@ -786,7 +814,7 @@ void flashOne(int score) {
 	}
 }
 
-void flashFrame(int score) {
+void flashMarker(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
@@ -1211,9 +1239,9 @@ void printSymbols() {
 }
 
 // Print the scores over the serial port.
-void printScores(uint8_t zero, uint8_t one, uint8_t frame) {
+void printScores(uint8_t zero, uint8_t one, uint8_t marker) {
 	static bool separated = false;
-	if (zero > scoreThreshold || one > scoreThreshold || frame > scoreThreshold) {
+	if (zero > scoreThreshold || one > scoreThreshold || marker > scoreThreshold) {
 		Serial.print(zero);
 		if (zero > scoreThreshold)
 			Serial.print("**  ");
@@ -1226,8 +1254,8 @@ void printScores(uint8_t zero, uint8_t one, uint8_t frame) {
 		else
 			Serial.print("    ");
 
-		Serial.print(frame);
-		if (frame > scoreThreshold)
+		Serial.print(marker);
+		if (marker > scoreThreshold)
 			Serial.print("**\n");
 		else
 			Serial.print("\n");
@@ -1301,26 +1329,26 @@ void test_showPatterns() {
 	Serial.print(SYMBOL_ONE[0], BIN);
 	Serial.print('\n');
 
-	Serial.print("SYMBOL_FRAME: ");
-	Serial.print(SYMBOL_FRAME[9], BIN);
+	Serial.print("SYMBOL_MARKER: ");
+	Serial.print(SYMBOL_MARKER[9], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[8], BIN);
+	Serial.print(SYMBOL_MARKER[8], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[7], BIN);
+	Serial.print(SYMBOL_MARKER[7], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[6], BIN);
+	Serial.print(SYMBOL_MARKER[6], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[5], BIN);
+	Serial.print(SYMBOL_MARKER[5], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[4], BIN);
+	Serial.print(SYMBOL_MARKER[4], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[3], BIN);
+	Serial.print(SYMBOL_MARKER[3], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[2], BIN);
+	Serial.print(SYMBOL_MARKER[2], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[1], BIN);
+	Serial.print(SYMBOL_MARKER[1], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_FRAME[0], BIN);
+	Serial.print(SYMBOL_MARKER[0], BIN);
 	Serial.print('\n');
 }
 
@@ -1344,8 +1372,8 @@ void test_shifter() {
 	Serial.print(score(SYMBOL_ZERO));
 	Serial.print("\nZERO on ONE: ");
 	Serial.print(score(SYMBOL_ONE));
-	Serial.print("\nZERO on FRAME: ");
-	Serial.print(score(SYMBOL_FRAME));
+	Serial.print("\nZERO on MARKER: ");
+	Serial.print(score(SYMBOL_MARKER));
 	Serial.print("\n");
 
 	// Shift in a simulated SYMBOL_ONE, then compare to the other patterns
@@ -1366,11 +1394,11 @@ void test_shifter() {
 	Serial.print(score(SYMBOL_ZERO));
 	Serial.print("\nONE on ONE: ");
 	Serial.print(score(SYMBOL_ONE));
-	Serial.print("\nONE on FRAME: ");
-	Serial.print(score(SYMBOL_FRAME));
+	Serial.print("\nONE on MARKER: ");
+	Serial.print(score(SYMBOL_MARKER));
 	Serial.print("\n");
 
-	// Shift in a simulated SYMBOL_FRAME, then compare to the other patterns
+	// Shift in a simulated SYMBOL_MARKER, then compare to the other patterns
 	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
@@ -1384,12 +1412,11 @@ void test_shifter() {
 		shiftSample(1);
 	}
 	
-	Serial.print("FRAME on ZERO: ");
+	Serial.print("MARKER on ZERO: ");
 	Serial.print(score(SYMBOL_ZERO));
-	Serial.print("\nFRAME on ONE: ");
+	Serial.print("\nMARKER on ONE: ");
 	Serial.print(score(SYMBOL_ONE));
-	Serial.print("\nFRAME on FRAME: ");
-	Serial.print(score(SYMBOL_FRAME));
+	Serial.print("\nMARKER on MARKER: ");
+	Serial.print(score(SYMBOL_MARKER));
 	Serial.print("\n");
 }
-

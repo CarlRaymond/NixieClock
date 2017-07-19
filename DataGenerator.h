@@ -1,6 +1,6 @@
 #define ZERO 0
 #define ONE 1
-#define FRAME 2
+#define MARKER 2
 
 #include <Arduino.h>
 

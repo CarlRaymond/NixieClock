@@ -61,7 +61,7 @@ void DataGenerator::setCounts(uint8_t symbol) {
 			low_count = 30;
 			break;
 
-		case FRAME:
+		case MARKER:
 		default:
 			high_count = 48;
 			low_count = 12;
