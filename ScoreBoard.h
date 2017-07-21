@@ -5,7 +5,7 @@
 class ScoreBoard {
 
 	public:
-		static const int size = 7;
+		static const int size = 11;
 		ScoreBoard();
 
 		void shiftScore(uint8_t score);

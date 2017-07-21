@@ -124,10 +124,11 @@ const int PIN_SCK = 13;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count tick_frac_numerator (out of
-// tick_frac_denominator) using tick_interval_cycles+1, and the remainder
-// using tick_interval_cycles.
-// For 60Hz, count two periods of 33,333 cycles for each 
-// period of 33,334 cycles (with prescaler = 8, or 2,000,000Hz clock).
+// tick_frac_denominator) intervals using tick_interval_cycles+1, and the remainder
+// using tick_interval_cycles. The denominator of the fraction is 16, effectively
+// adding 4 bits of resolution to the counter (from 16 to 20 bits).
+// For 60Hz (with prescaler = 8, or 2,000,000Hz clock), count 33,333 1/3
+// cycles. The closest frational value is 33,333 5/16.
 
 // No. of (whole) cycles in a short period
 volatile uint16_t tick_interval_cycles = 33333;
@@ -153,11 +154,11 @@ const uint32_t SAMPLE_ZERO = pixels.Color(5, 1, 8);
 const uint32_t SAMPLE_CURSOR = pixels.Color(3, 50, 2);
 
 const uint32_t RED = pixels.Color(255,0,0);
-const uint32_t ORANGE = pixels.Color(255,50,0);
+const uint32_t ORANGE = pixels.Color(204,51,0);
 const uint32_t YELLOW = pixels.Color(255,150,0);
 const uint32_t GREEN = pixels.Color(0,255,0);
 const uint32_t BLUE = pixels.Color(0,0,255);
-const uint32_t PURPLE = pixels.Color(128,0,128);
+const uint32_t PURPLE = pixels.Color(96,0,96);
 const uint32_t PINK = pixels.Color(60, 0, 10);
 const uint32_t FLASH = pixels.Color(255, 128, 128);
 
@@ -263,20 +264,6 @@ void setup() {
 	pixels.begin();
 
 	Serial.begin(230400);
-
-	// Backlight rainbow
-	pixels.setPixelColor(60, RED);
-	pixels.setPixelColor(61, ORANGE);
-	pixels.setPixelColor(64, YELLOW);
-	pixels.setPixelColor(65, GREEN);
-	pixels.setPixelColor(68, BLUE);
-	pixels.setPixelColor(69, PURPLE);
-
-	// Colons
-	pixels.setPixelColor(62, PINK);
-	pixels.setPixelColor(63, PINK);
-	pixels.setPixelColor(66, PINK);
-	pixels.setPixelColor(67, PINK);
 
 	pixels.show();
 
@@ -425,10 +412,12 @@ uint8_t bitSeek_matchCount = 0;
 int bitSeek_tickCount = 0;
 
 // Variables for MODE_SYNC
-uint8_t bitSync_ticksRemaining = 60;
-uint32_t bitSync_ticksSinceSync = 0;
+uint8_t bitSync_peekCountdown = 60;
+uint32_t bitSync_expectedTicksSinceSync = 0;
+uint32_t bitSync_observedTicksSinceSync = 0;
+
 // Seconds without a bit received remaining before dropping sync
-uint8_t bitSync_syncTimeout = 6;
+uint8_t bitSync_syncLossTimeout = 6;
 
 // Changes the operating mode, updating necessary variables.
 void setMode(uint8_t newMode) {
@@ -441,9 +430,10 @@ void setMode(uint8_t newMode) {
 			break;
 
 		case MODE_SYNC:
-			bitSync_ticksRemaining = 60;
-			bitSync_ticksSinceSync = 0L;
-			bitSync_syncTimeout = 6;
+			bitSync_peekCountdown = 60;
+			bitSync_expectedTicksSinceSync = 0L;
+			bitSync_observedTicksSinceSync = 0L;
+			bitSync_syncLossTimeout = 6;
 			setColonColor(BLUE);
 			break;
 	}
@@ -455,8 +445,8 @@ void setMode(uint8_t newMode) {
 // Invoked on each tick when in MODE_SEEK. Look for 6 consecutive successful bits. If a bit
 // interval elapses without a bit, reset the match count to 0.
 void bitSeek() {
-	uint8_t maxScore;
-	uint8_t maxIndex;
+	uint8_t peakScore;
+	uint8_t peakIndex;
 
 	static uint8_t timeout = 65;
 	bitSeek_tickCount++;
@@ -468,22 +458,22 @@ void bitSeek() {
 	}
 
 	// A successful bit has peak in middle slot of 7
-	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		if (maxIndex == 3) {
+	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
+		if (peakIndex == 3) {
 			bitSeek_matchCount++;
 			timeout = 65;
 			shiftSymbol('0');
 		}
 	}
-	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		if (maxIndex == 3) {
+	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
+		if (peakIndex == 3) {
 			bitSeek_matchCount++;
 			timeout = 65;
 			shiftSymbol('1');
 		}
 	}
-	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
-		if (maxIndex == 3) {
+	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
+		if (peakIndex == 3) {
 			bitSeek_matchCount++;
 			timeout = 65;
 			shiftSymbol('M');
@@ -500,123 +490,73 @@ void bitSeek() {
 // Invoked on each tich when in MODE_SYNC. Let 60 ticks elapse, and look for a
 // symbol match. If max scores slot index changes, indicating drift, recalibrate the tick
 // time interval.
-// If we fail to see a symbol for 30 seconds, switch back to MODE_SEEK.
+// If we fail to see a symbol for 6 seconds (not ticks), switch back to MODE_SEEK.
 void bitSync() {
 
-	bitSync_ticksSinceSync++;
-	if (--bitSync_ticksRemaining > 0)
+	bitSync_expectedTicksSinceSync++;
+	if (--bitSync_peekCountdown > 0)
 		return;
 
 	// Look for next symbol.
-	uint8_t maxScore = 0;
-	uint8_t maxIndex = 3;
+	uint8_t peakScore = 0;
+	uint8_t peakIndex = 5;
 
-	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('0');
-		bitSync_syncTimeout = 6;
+		bitSync_syncLossTimeout = 6;
 	}
-	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('1');
-		bitSync_syncTimeout = 6;
+		bitSync_syncLossTimeout = 6;
 	}
-	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &maxScore, &maxIndex)) {
+	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('M');
-		bitSync_syncTimeout = 6;
+		bitSync_syncLossTimeout = 6;
 	}
 	else {
 		// No symbol seen.
 		shiftSymbol('X');
-		if (--bitSync_syncTimeout == 0) {
-			// Sync dropped.
+		if (--bitSync_syncLossTimeout == 0) {
+			// Sync lost.
 			setMode(MODE_SEEK);
 			return;
+		}
+		else {
+			// Assume it would have arrived on time.
+			peakIndex = 5;
 		}
 	}
 
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
 	// in a different slot means the local oscillator is running fast or slow compared
-	// to the reference.  When we have accumulated 3 ticks of drift, update the
-	// tick interval timer accordingly.  Waiting until 3 ticks prevents updating
-	// too often.
-	switch (maxIndex) {
-		case 0:
-			// Symbol arrived 3 slots late (w.r.t. local clock -- we're fast). Tick period too short. Lengthen.
-			Serial.print(" SHORT ");
+	// to the reference.  Accumulate this delta over multiple cycles.  When the delta
+	// reaches a limit, adjust the tick interval.
 
-			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync-3);
-
-			// Re-sync by waiting 3 more ticks before next check.
-			bitSync_ticksRemaining = 63;
-			bitSync_ticksSinceSync = 0L;
-			break;
-
-		case 6:
-			// Symbol arrived 3 slots early (w.r.t. local clock). Tick period too long. Shorten.
-			Serial.print(" LONG ");
-
-			adjustTickInterval(bitSync_ticksSinceSync, bitSync_ticksSinceSync+3);
-
-			// Re-sync by waiting 3 fewer ticks before next check.
-			bitSync_ticksRemaining = 57;
-			bitSync_ticksSinceSync = 0L;
-			break;
-
-		default:
-			// Symbol peak found within +- 2 ticks of expected. That's OK.
-			bitSync_ticksRemaining = 60;
-	}
-
-}
-
-
-void shiftSymbol(char newSymbol) {
-	uint8_t score = 0;
-
-	Serial.print("Shifting ");
-	Serial.print(newSymbol);
+	Serial.print("Sync point: ");
+	Serial.print(peakIndex - 5);
 	Serial.print('\n');
 
-	// Single loop for shifting and scoring. Only check that positions that should have
-	// marker symbol have them, and that non-marker positions do not.
+	bitSync_observedTicksSinceSync += (55 + peakIndex);
+	bitSync_peekCountdown = 65 - peakIndex;
 
-	// When markerPos = 0, we're shifting into a marker position. It gets reset to 9
-	// after processing a marker position.
-	uint8_t markerPosCountdown = 10;
-	for (uint8_t i=0;  i<59;  i++) {
-		markerPosCountdown--;
-		char symbol = symbolStream[i+1];
-		symbolStream[i] = symbol;
-		if (i == 0) {
-			// Should be a marker symbol.
-			if (symbol == 'M')
-				score++;
-		}
-		if (markerPosCountdown == 0) {
-			// Should be a marker symbol.
-			if (symbol == 'M')
-				score++;
-			markerPosCountdown = 10;
-		}
-		else {
-			// Should be a 1 or 0.
-			if (symbol == '0'  ||  symbol == '1')
-				score++;
-		}
-	}
+	// Have we accumulated enough delta to adjust?
+	long delta = bitSync_expectedTicksSinceSync - bitSync_observedTicksSinceSync;
 
-	symbolStream[59] = newSymbol;
-	if (newSymbol == 'M' )
-		score++;
+	Serial.print("Delta: ");
+	Serial.print(delta);
+	Serial.print("    expected ticks: ");
+	Serial.print(bitSync_expectedTicksSinceSync);
+	Serial.print("    observed ticks: ");
+	Serial.print(bitSync_observedTicksSinceSync);
+	Serial.print('\n');
 
-
-	printSymbols();
-
-	if (score == 60) {
-		valid_frame = true;
+	if (delta < -12  ||  delta > 12) {
+		Serial.print("Adjusting interval");
+		adjustTickInterval(bitSync_expectedTicksSinceSync, bitSync_observedTicksSinceSync);
+		bitSync_expectedTicksSinceSync = 0;
+		bitSync_observedTicksSinceSync = 0;
 	}
 }
-
-
 
 
 // Udpate the tick interval to compensate for counting actualTicks while
@@ -685,12 +625,70 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 		Serial.print('\n');
 	}
 
+	// Bound by +- 3% of 33,333.333
+	if (updatedCounts < 506986) {
+		Serial.print("Bounded from above to 506986");
+		updatedCounts = 506986;
+	}
+	if (updatedCounts > 549333) {
+		Serial.print("Bounded from below to 549333");
+		updatedCounts = 549333;
+	}
+
 	// Convert back to whole cycles and fraction.
 	tick_frac_numerator = updatedCounts % tick_frac_denominator;
 	tick_interval_cycles = updatedCounts / tick_frac_denominator;
 
 	tick_interval_changed = true;
 }
+
+void shiftSymbol(char newSymbol) {
+	uint8_t score = 0;
+
+	//Serial.print("Shifting ");
+	//Serial.print(newSymbol);
+	//Serial.print('\n');
+
+	// Single loop for shifting and scoring. Only check that positions that should have
+	// marker symbol have them, and that non-marker positions do not.
+
+	// When markerPos = 0, we're shifting into a marker position. It gets reset to 9
+	// after processing a marker position.
+	uint8_t markerPosCountdown = 10;
+	for (uint8_t i=0;  i<59;  i++) {
+		markerPosCountdown--;
+		char symbol = symbolStream[i+1];
+		symbolStream[i] = symbol;
+		if (i == 0) {
+			// Should be a marker symbol.
+			if (symbol == 'M')
+				score++;
+		}
+		if (markerPosCountdown == 0) {
+			// Should be a marker symbol.
+			if (symbol == 'M')
+				score++;
+			markerPosCountdown = 10;
+		}
+		else {
+			// Should be a 1 or 0.
+			if (symbol == '0'  ||  symbol == '1')
+				score++;
+		}
+	}
+
+	symbolStream[59] = newSymbol;
+	if (newSymbol == 'M' )
+		score++;
+
+
+	printSymbols();
+
+	if (score == 60) {
+		valid_frame = true;
+	}
+}
+
 
 void decodeTimeOfDay(uint8_t ticksDelta) {
 
