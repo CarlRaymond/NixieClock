@@ -413,7 +413,7 @@ int bitSeek_tickCount = 0;
 
 // Variables for MODE_SYNC
 uint8_t bitSync_peekCountdown = 60;
-uint32_t bitSync_expectedTicksSinceSync = 0;
+uint32_t bitSync_localTicksSinceSync = 0;
 uint32_t bitSync_observedTicksSinceSync = 0;
 
 // Seconds without a bit received remaining before dropping sync
@@ -431,7 +431,7 @@ void setMode(uint8_t newMode) {
 
 		case MODE_SYNC:
 			bitSync_peekCountdown = 60;
-			bitSync_expectedTicksSinceSync = 0L;
+			bitSync_localTicksSinceSync = 0L;
 			bitSync_observedTicksSinceSync = 0L;
 			bitSync_syncLossTimeout = 6;
 			setColonColor(BLUE);
@@ -455,11 +455,12 @@ void bitSeek() {
 		// No bit seen. Reset.
 		bitSeek_matchCount = 0;
 		timeout = 60;
+		shiftSymbol('X');
 	}
 
-	// A successful bit has peak in middle slot of 7
+	// A successful bit has peak in middle slot of 5
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == 3) {
+		if (peakIndex == 5) {
 			bitSeek_matchCount++;
 			timeout = 65;
 			shiftSymbol('0');
@@ -487,13 +488,13 @@ void bitSeek() {
 	}
 }
 
-// Invoked on each tich when in MODE_SYNC. Let 60 ticks elapse, and look for a
+// Invoked on each tick when in MODE_SYNC. Let 60 ticks elapse, and look for a
 // symbol match. If max scores slot index changes, indicating drift, recalibrate the tick
 // time interval.
 // If we fail to see a symbol for 6 seconds (not ticks), switch back to MODE_SEEK.
 void bitSync() {
 
-	bitSync_expectedTicksSinceSync++;
+	bitSync_localTicksSinceSync++;
 	if (--bitSync_peekCountdown > 0)
 		return;
 
@@ -537,25 +538,26 @@ void bitSync() {
 	Serial.print('\n');
 
 	bitSync_observedTicksSinceSync += (55 + peakIndex);
-	bitSync_peekCountdown = 65 - peakIndex;
 
-	// Have we accumulated enough delta to adjust?
-	long delta = bitSync_expectedTicksSinceSync - bitSync_observedTicksSinceSync;
+	long delta = bitSync_localTicksSinceSync - bitSync_observedTicksSinceSync;
 
 	Serial.print("Delta: ");
 	Serial.print(delta);
-	Serial.print("    expected ticks: ");
-	Serial.print(bitSync_expectedTicksSinceSync);
-	Serial.print("    observed ticks: ");
+	Serial.print("    Local ticks: ");
+	Serial.print(bitSync_localTicksSinceSync);
+	Serial.print("    Observed ticks: ");
 	Serial.print(bitSync_observedTicksSinceSync);
 	Serial.print('\n');
 
+	// Have we accumulated enough delta to adjust?
 	if (delta < -12  ||  delta > 12) {
 		Serial.print("Adjusting interval");
-		adjustTickInterval(bitSync_expectedTicksSinceSync, bitSync_observedTicksSinceSync);
-		bitSync_expectedTicksSinceSync = 0;
+		adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - (delta >> 1));
+		bitSync_localTicksSinceSync = 0;
 		bitSync_observedTicksSinceSync = 0;
 	}
+
+	bitSync_peekCountdown = 65 - peakIndex;
 }
 
 
@@ -781,7 +783,7 @@ void flashZero(int score) {
 
 	if (score > scoreThreshold) {
 		hold = 24;
-		pixels.setPixelColor(68, BLUE);
+		pixels.setPixelColor(68, PURPLE);
 		pixels.setPixelColor(69, PURPLE);
 	}
 	else {
@@ -799,7 +801,7 @@ void flashOne(int score) {
 
 	if (score > scoreThreshold) {
 		hold = 24;
-		pixels.setPixelColor(64, YELLOW);
+		pixels.setPixelColor(64, GREEN);
 		pixels.setPixelColor(65, GREEN);
 	}
 	else {
@@ -818,7 +820,7 @@ void flashMarker(int score) {
 	if (score > scoreThreshold) {
 		hold = 24;
 		pixels.setPixelColor(60, RED);
-		pixels.setPixelColor(61, ORANGE);
+		pixels.setPixelColor(61, RED);
 	}
 	else {
 		if (hold > 0)
