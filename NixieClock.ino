@@ -72,15 +72,15 @@
 // rather than bits. A peak in the scores is detected by looking for the ramp pattern in
 // the score history. The history buffer size, n, should be an odd number (5? 7? 11?), and
 // the peak finder looks for the case where the peak value is in the middle slot, with
-// decreasing (or at least non-increasing) values on either side. (The case of two adjacent
-// maximum values may have to be handled, as well.)
+// decreasing (or at least non-increasing) values on either side.
 //
 // At this point, the data bits can be recognized by the appearance of the peaks in the three
 // symbol scoring buffers. Right after receiving a nice clean bit, one of the three buffers should
 // show a score above the threshold, with a peak value. The other two buffers should show scores
-// below the threshold, and not sharply peaked. After 60 ticks (one second), the following bit
+// below the threshold, and not sharply peaked. (The threshold is chosen so that only one score buffer
+// at a time can have a score above the threshold.) After 60 ticks (one second), the following bit
 // will have been recieved, and one of the three buffers should show a peak, ideally in the same
-// position within the buffer. If the receiver should miss a bit, no buffer will show a peak.
+// position within the buffer.  If the receiver should miss a bit, no buffer will show a peak.
 //
 // The task now is to keep the location of the peak from drifting as successive bits are decoded. Drift
 // indicates that the tick interval timer's period is too short or too long. On noticing drift (after
@@ -122,6 +122,9 @@ const int PIN_MOSI = 11;
 const int PIN_MISO = 12; // Unused
 const int PIN_SCK = 13;
 
+
+
+
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count tick_frac_numerator (out of
 // tick_frac_denominator) intervals using tick_interval_cycles+1, and the remainder
@@ -149,9 +152,9 @@ Adafruit_NeoPixel pixels = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800
 
 // Colors
 const uint32_t OFF = 0L;
-const uint32_t SAMPLE_ONE = pixels.Color(6, 1, 0);
-const uint32_t SAMPLE_ZERO = pixels.Color(5, 1, 8);
-const uint32_t SAMPLE_CURSOR = pixels.Color(3, 50, 2);
+const uint32_t SAMPLE_ONE = pixels.Color(7, 1, 0);
+const uint32_t SAMPLE_ZERO = pixels.Color(3, 1, 6);
+const uint32_t SAMPLE_CURSOR = pixels.Color(2, 36, 2);
 
 const uint32_t RED = pixels.Color(255,0,0);
 const uint32_t ORANGE = pixels.Color(204,51,0);
@@ -185,7 +188,7 @@ uint8_t SYMBOL_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f,
 uint8_t SYMBOL_MARKER[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
-uint8_t scoreThreshold = 68;
+uint8_t scoreThreshold = 69;
 
 // Score history buffers
 ScoreBoard scoreboard_zero = ScoreBoard();
@@ -302,7 +305,7 @@ void loop() {
 		Serial.print('\n');
 
 		// Set time of day from the symbol frame, taking processing time offset into account.
-		decodeTimeOfDay(14);
+		decodeTimeOfDay(10 + ScoreBoard::centerIndex);
 		tod_fix = true;
 
 		printTimeUtc();
@@ -354,8 +357,8 @@ void tick() {
 	PORTD |= B00000100;
 
 	// Sample the input - port D bit 7
-	//bool input = (PORTD & B00000001) >> 7;
-	uint8_t input = digitalRead(PIN_WWVB);
+	uint8_t input = (PIND & B10000000) >> 7;
+	//uint8_t input = digitalRead(PIN_WWVB);
 	//uint8_t input = fake_frame.nextBit();
 	shiftSample(input);
 
@@ -409,7 +412,9 @@ void sampleToRing(uint8_t sample) {
 
 // Variables for MODE_SEEK
 uint8_t bitSeek_matchCount = 0;
-int bitSeek_tickCount = 0;
+int bitSeek_ticksSinceLastSymbol = 0;
+const uint8_t bitSeek_windowMaxTicks = 66;
+const uint8_t bitSeek_windowMinTicks = 54;
 
 // Variables for MODE_SYNC
 uint8_t bitSync_peekCountdown = 60;
@@ -425,7 +430,7 @@ void setMode(uint8_t newMode) {
 		case MODE_SEEK:
 			// Reset counters
 			bitSeek_matchCount = 0;
-			bitSeek_tickCount = 0;
+			bitSeek_ticksSinceLastSymbol = 0;
 			setColonColor(PINK);
 			break;
 
@@ -442,48 +447,55 @@ void setMode(uint8_t newMode) {
 	mode_changed = true;
 }
 
-// Invoked on each tick when in MODE_SEEK. Look for 6 consecutive successful bits. If a bit
+// Invoked on each tick when in MODE_SEEK. Look for multiple consecutive successful bits. If a bit
 // interval elapses without a bit, reset the match count to 0.
 void bitSeek() {
 	uint8_t peakScore;
 	uint8_t peakIndex;
 
-	static uint8_t timeout = 65;
-	bitSeek_tickCount++;
+	bitSeek_ticksSinceLastSymbol++;
 
-	if (--timeout == 0) {
-		// No bit seen. Reset.
+	if (bitSeek_ticksSinceLastSymbol > bitSeek_windowMaxTicks) {
+		// Exceeded detection window with no bit seen. Reset.
 		bitSeek_matchCount = 0;
-		timeout = 60;
+		bitSeek_ticksSinceLastSymbol = 0;
 		shiftSymbol('X');
+		return;
 	}
 
-	// A successful bit has peak in middle slot of 5
+	char candidateSymbol = 0;
+
+	// A successful bit has peak in the middle slot
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == 5) {
-			bitSeek_matchCount++;
-			timeout = 65;
-			shiftSymbol('0');
+		if (peakIndex == ScoreBoard::centerIndex) {
+			candidateSymbol = '0';
 		}
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == 3) {
-			bitSeek_matchCount++;
-			timeout = 65;
-			shiftSymbol('1');
+		if (peakIndex == ScoreBoard::centerIndex) {
+			candidateSymbol = '1';
 		}
 	}
 	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == 3) {
-			bitSeek_matchCount++;
-			timeout = 65;
-			shiftSymbol('M');
+		if (peakIndex == ScoreBoard::centerIndex) {
+			candidateSymbol = 'M';
 		}
 	}
 
-	if (bitSeek_matchCount == 6) {
-		Serial.print("Found 6 consecutive symbols.\n");
+	// Any symbol seen?
+	if (candidateSymbol != 0) {
+		// Did it arrive within the window?  Window maximum already checked by timeout;
+		// check against window minimum
+		if (bitSeek_ticksSinceLastSymbol >= bitSeek_windowMinTicks) {
+			// Bit seen within window.
+			bitSeek_matchCount++;
+			bitSeek_ticksSinceLastSymbol = 0;
+			shiftSymbol(candidateSymbol);
+		}
+	}
 
+	if (bitSeek_matchCount == 5) {
+		// Enough consecutive bits seen. Commence syncin' proper.
 		setMode(MODE_SYNC);
 	}
 }
@@ -500,7 +512,7 @@ void bitSync() {
 
 	// Look for next symbol.
 	uint8_t peakScore = 0;
-	uint8_t peakIndex = 5;
+	uint8_t peakIndex = ScoreBoard::centerIndex;
 
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('0');
@@ -522,10 +534,6 @@ void bitSync() {
 			setMode(MODE_SEEK);
 			return;
 		}
-		else {
-			// Assume it would have arrived on time.
-			peakIndex = 5;
-		}
 	}
 
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
@@ -533,11 +541,13 @@ void bitSync() {
 	// to the reference.  Accumulate this delta over multiple cycles.  When the delta
 	// reaches a limit, adjust the tick interval.
 
+	int8_t offset = peakIndex - ScoreBoard::centerIndex;
+
 	Serial.print("Sync point: ");
-	Serial.print(peakIndex - 5);
+	Serial.print(offset);
 	Serial.print('\n');
 
-	bitSync_observedTicksSinceSync += (55 + peakIndex);
+	bitSync_observedTicksSinceSync += (60 + offset);
 
 	long delta = bitSync_localTicksSinceSync - bitSync_observedTicksSinceSync;
 
@@ -557,7 +567,7 @@ void bitSync() {
 		bitSync_observedTicksSinceSync = 0;
 	}
 
-	bitSync_peekCountdown = 65 - peakIndex;
+	bitSync_peekCountdown = 60 - offset;
 }
 
 
@@ -627,15 +637,15 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 		Serial.print('\n');
 	}
 
-	// Bound by +- 3% of 33,333.333
-	if (updatedCounts < 506986) {
-		Serial.print("Bounded from above to 506986");
-		updatedCounts = 506986;
-	}
-	if (updatedCounts > 549333) {
-		Serial.print("Bounded from below to 549333");
-		updatedCounts = 549333;
-	}
+	// Sanity: bound by +- 5% of 33,333.333
+	//if (updatedCounts < 506666) {
+	//	Serial.print("Bounded from above to 506666\n");
+	//	updatedCounts = 506666;
+	//}
+	//if (updatedCounts > 560000) {
+	//	Serial.print("Bounded from below to 560000\n");
+	//	updatedCounts = 560000;
+	//}
 
 	// Convert back to whole cycles and fraction.
 	tick_frac_numerator = updatedCounts % tick_frac_denominator;
