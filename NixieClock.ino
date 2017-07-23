@@ -1,4 +1,5 @@
 #include <SPI.h>
+#include <EEPROM.h>
 #include "DataGenerator.h"
 #include "ScoreBoard.h"
 #include <Adafruit_NeoPixel.h>
@@ -122,8 +123,13 @@ const int PIN_MOSI = 11;
 const int PIN_MISO = 12; // Unused
 const int PIN_SCK = 13;
 
+const int parametersVersion = 1;
 
-
+// Parameters for clock that get saved in EEPROM. Version number helps with sanity checking.
+typedef struct {
+	uint8_t version;
+	uint32_t scaledCounts; 
+} PersistentParameters;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count tick_frac_numerator (out of
@@ -142,6 +148,8 @@ volatile uint8_t tick_frac_numerator = 5;
 // Total no. of periods in full sequence; i.e., denominator of fractional part.
 // A power of 2 to simplify math.
 const uint8_t tick_frac_denominator = 16;
+
+bool overrideSavedParameters = false;
 
 // Communicates to main loop that the heartbeat period changed. Set true during
 // interrupt processing; reset in main loop.
@@ -202,6 +210,9 @@ char symbolStream[60];
 
 // Set true by shiftSymbol; watched by main loop;
 volatile bool valid_frame = false;
+
+// set true by bitSync; watched by main loop.
+volatile bool save_parameters = false;
 
 // Current time of day, UTC
 volatile unsigned short tod_ticks = 0;
@@ -272,8 +283,8 @@ void setup() {
 
 	setTubePwm(150);
 
-	//test_showPatterns();
-	//test_shifter();
+	if (!overrideSavedParameters)
+		configureFromMemory();
 
 	setMode(MODE_SEEK);
 }
@@ -289,8 +300,7 @@ void loop() {
 	if (valid_frame) {
 		valid_frame = false;
 		
-		Serial.print("Valid frame: ");
-		printSymbols();
+		Serial.print("Valid frame!\n");
 		for (int i=0;  i<60;  i++) {
 			pixels.setPixelColor(i, PINK);
 		}
@@ -348,6 +358,18 @@ void loop() {
 				Serial.print(mode);			
 		}
 		Serial.print('\n');
+	}
+
+	if (save_parameters) {
+		PersistentParameters params;
+		params.version = parametersVersion;
+		params.scaledCounts = (uint32_t) tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
+
+		saveParameters(0, &params);
+
+		Serial.print("Saved parameters to EEPROM.\n");
+
+		save_parameters = false;
 	}
 }
 
@@ -413,13 +435,14 @@ void sampleToRing(uint8_t sample) {
 // Variables for MODE_SEEK
 uint8_t bitSeek_matchCount = 0;
 int bitSeek_ticksSinceLastSymbol = 0;
-const uint8_t bitSeek_windowMaxTicks = 66;
-const uint8_t bitSeek_windowMinTicks = 54;
+const uint8_t bitSeek_windowMaxTicks = 63;
+const uint8_t bitSeek_windowMinTicks = 57;
 
 // Variables for MODE_SYNC
 uint8_t bitSync_peekCountdown = 60;
 uint32_t bitSync_localTicksSinceSync = 0;
-uint32_t bitSync_observedTicksSinceSync = 0;
+int8_t bitSync_accumulatedOffset = 0;
+bool bitSync_parametersSaved = false;
 
 // Seconds without a bit received remaining before dropping sync
 uint8_t bitSync_syncLossTimeout = 6;
@@ -437,7 +460,8 @@ void setMode(uint8_t newMode) {
 		case MODE_SYNC:
 			bitSync_peekCountdown = 60;
 			bitSync_localTicksSinceSync = 0L;
-			bitSync_observedTicksSinceSync = 0L;
+			bitSync_accumulatedOffset = 0;
+			bitSync_parametersSaved = false;
 			bitSync_syncLossTimeout = 6;
 			setColonColor(BLUE);
 			break;
@@ -534,6 +558,10 @@ void bitSync() {
 			setMode(MODE_SEEK);
 			return;
 		}
+
+		// Try again next second.
+		bitSync_peekCountdown = 60;
+		return;
 	}
 
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
@@ -541,33 +569,36 @@ void bitSync() {
 	// to the reference.  Accumulate this delta over multiple cycles.  When the delta
 	// reaches a limit, adjust the tick interval.
 
-	int8_t offset = peakIndex - ScoreBoard::centerIndex;
+	int8_t offset = ScoreBoard::centerIndex - peakIndex;
 
-	Serial.print("Sync point: ");
+	Serial.print("Sync offset: ");
 	Serial.print(offset);
 	Serial.print('\n');
 
-	bitSync_observedTicksSinceSync += (60 + offset);
+	bitSync_accumulatedOffset += offset;
 
-	long delta = bitSync_localTicksSinceSync - bitSync_observedTicksSinceSync;
-
-	Serial.print("Delta: ");
-	Serial.print(delta);
+	Serial.print("Accumulated offset: ");
+	Serial.print(bitSync_accumulatedOffset);
 	Serial.print("    Local ticks: ");
 	Serial.print(bitSync_localTicksSinceSync);
-	Serial.print("    Observed ticks: ");
-	Serial.print(bitSync_observedTicksSinceSync);
 	Serial.print('\n');
 
 	// Have we accumulated enough delta to adjust?
-	if (delta < -12  ||  delta > 12) {
+	if (bitSync_accumulatedOffset < -12  ||  bitSync_accumulatedOffset > 12) {
 		Serial.print("Adjusting interval");
-		adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - (delta >> 1));
+		adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
 		bitSync_localTicksSinceSync = 0;
-		bitSync_observedTicksSinceSync = 0;
+		bitSync_accumulatedOffset = 0;
 	}
 
+	// Next time, peek when next bit should be centered
 	bitSync_peekCountdown = 60 - offset;
+
+	// Time to save parameters?  
+	if (bitSync_localTicksSinceSync > 500000  &&  !bitSync_parametersSaved) {
+		save_parameters = true;
+		bitSync_parametersSaved = true;
+	}
 }
 
 
@@ -1169,6 +1200,67 @@ void setHours(int value) {
 
 void setTubePwm(uint8_t value) {
 	OCR2B = value;
+}
+
+void configureFromMemory() {
+	PersistentParameters params;
+
+	loadParameters(0, &params);
+
+	// Load up with defaults in case loaded params look weird.
+	tick_interval_cycles = 33333;
+	tick_frac_numerator = 5;  // 5/16
+
+	// Validate.
+	if (params.version != 1) {
+		Serial.print("configureFromMemory: bad version.  Expected 1; found ");
+		Serial.print(params.version);
+		return;
+	}
+
+	// Bound within 5% of standard
+	if (params.scaledCounts < 506666  ||  params.scaledCounts > 560000) {
+		Serial.print("configureFromMemory: scaledCount out of range. Found ");
+		Serial.print(params.scaledCounts);
+		return;
+	}
+
+	// Use params.
+	tick_frac_numerator = params.scaledCounts % tick_frac_denominator;
+	tick_interval_cycles = params.scaledCounts / tick_frac_denominator;
+
+	Serial.print("Using stored parameters: ");
+	Serial.print(tick_interval_cycles);
+	Serial.print(' ');
+	Serial.print(tick_frac_numerator);
+	Serial.print("/16\n");
+}
+
+// Writes a parameters structure to EEPROM.  Returns number of bytes written.
+uint16_t saveParameters(uint16_t address, PersistentParameters *params) {
+	// Cast to byte pointer
+	byte *p = (byte *)(void *)params;
+
+	uint16_t i;
+	 for (i = 0; i < sizeof(PersistentParameters); i++) {
+	 	Serial.print(*p, HEX);
+        EEPROM.write(address++, *p++);
+	 }
+    return i;
+}
+
+// Reads a parameters sructure from EEPROM.  Returns number of bytes read.
+uint16_t loadParameters(uint16_t address, PersistentParameters *params) {
+	// Cast to byte pointer
+	byte *p = (byte *)(void *)params;
+
+	uint16_t i;
+	for (i = 0; i < sizeof(PersistentParameters); i++) {
+    	*p = EEPROM.read(address++);
+		Serial.print(*p, HEX);
+		p++;
+	}
+    return i;	
 }
 
 void configureTimers() {
