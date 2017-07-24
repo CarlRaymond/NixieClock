@@ -158,12 +158,16 @@ volatile bool tick_interval_changed = false;
 // First 60 pixels are the ring; the final 10 are the on-board backlight pixels
 Adafruit_NeoPixel pixels = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
+// Holds input samples
+uint8_t sampleBuffer[60];
+uint8_t pixelIndex;
+
 // Colors
 const uint32_t OFF = 0L;
 const uint32_t SAMPLE_ONE = pixels.Color(7, 1, 0);
 const uint32_t SAMPLE_ZERO = pixels.Color(3, 1, 6);
 const uint32_t SAMPLE_CURSOR = pixels.Color(2, 36, 2);
-
+const uint32_t BACKGROUND = pixels.Color(1, 4, 1);
 const uint32_t RED = pixels.Color(255,0,0);
 const uint32_t ORANGE = pixels.Color(204,51,0);
 const uint32_t YELLOW = pixels.Color(255,150,0);
@@ -251,6 +255,9 @@ uint8_t fakedata[] = {
 	ZERO,	ONE,	ONE,	ONE,	ZERO,	ZERO,	ZERO,	ONE,	ONE,	MARKER	// 50-59
 };
 DataGenerator fake_frame = DataGenerator(fakedata, sizeof(fakedata), 0);
+
+// Set true in tick(); watched by main loop;
+volatile bool update_pixels;
 
 // One-time setup at start
 void setup() {
@@ -371,7 +378,109 @@ void loop() {
 
 		save_parameters = false;
 	}
+
+	if (update_pixels) {
+		updatePixels();
+		update_pixels = false;
+	}
 }
+
+
+void updatePixels() {
+
+	uint32_t pixel;
+
+	for (uint8_t i = 0;  i<60;  i++) {
+		pixel = BACKGROUND;
+
+		// Read from pixel buffer
+		if (sampleBuffer[i])
+			pixel = SAMPLE_ONE;
+
+		if (pixelIndex == i)
+			pixel = SAMPLE_CURSOR;
+
+		if (mode == MODE_SYNC) {
+			// Meter for the SYMBOL_ZERO detector
+			if (i >= 27 &&  i < (27+ScoreBoard::size)) {
+				uint8_t intensity;
+				uint8_t slot = i - 27;
+				uint8_t score = scoreboard_zero.getSlotValue(slot);
+				if (score > 77) {
+					intensity = 25;
+				}
+				else if (score > 74) {
+					intensity = 16;
+				}
+				else if (score > 71) {
+					intensity = 10;
+				}
+				else if (score > 65) {
+					intensity = 6;
+				}
+				else {
+					intensity = 1;
+				}
+				uint8_t r = pixel & 0x0f00 >> 17;
+				uint8_t g = pixel & 0x00f0 >> 9;
+				uint8_t b = pixel & 0x000f >> 1;
+
+				pixel = pixels.Color(r+intensity, g, b+intensity);
+			}
+
+			// Meter for the SYMBOL_ONE detector
+			if (i >= 7 && i < (7 + ScoreBoard::size)) {
+				uint8_t intensity;
+				uint8_t slot = i - 7;
+				uint8_t score = scoreboard_one.getSlotValue(slot);
+				if (score > 77)
+					intensity = 16;
+				else if (score > 74)
+					intensity = 10;
+				else if (score > 71)
+					intensity = 6;
+				else if (score > 65)
+					intensity = 4;
+				else
+					intensity = 1;
+
+				uint8_t r = pixel & 0x0f00 >> 17;
+				uint8_t g = pixel & 0x00f0 >> 9;
+				uint8_t b = pixel & 0x000f >> 1;
+
+				pixel = pixels.Color(r+intensity, g, b+intensity);
+			}
+
+			// Meter for the SYMBOL_MARKER detector
+			if (i >= 47 && i < (47 + ScoreBoard::size)) {
+				uint8_t intensity;
+				uint8_t slot = i - 47;
+				uint8_t score = scoreboard_marker.getSlotValue(slot);
+				if (score > 77)
+					intensity = 16;
+				else if (score > 74)
+					intensity = 10;
+				else if (score > 71)
+					intensity = 6;
+				else if (score > 65) {
+					intensity = 4;
+				else
+					intensity = 1;
+
+				uint8_t r = pixel & 0x0f00 >> 17;
+				uint8_t g = pixel & 0x00f0 >> 9;
+				uint8_t b = pixel & 0x000f >> 1;
+
+				pixel = pixels.Color(r+intensity, g, b+intensity);
+			}
+		}
+
+		pixels.setPixelColor(i, pixel);
+	}
+
+
+}
+
 
 // Invoked at 60Hz by ISR. Samples incoming data bits, and processes them through the discriminators.
 void tick() {
@@ -391,7 +500,7 @@ void tick() {
 	uint8_t score_MARKER = score(SYMBOL_MARKER);
 	scoreboard_marker.shiftScore(score_MARKER);
 
-	sampleToRing(input);
+	sampleToBuffer(input);
 
 	pixels.show();
 
@@ -409,34 +518,44 @@ void tick() {
 	flashOne(score_ONE);
 	flashMarker(score_MARKER);
 
-	// printScores(score_ZERO, score_ONE, score_MARKER);
-
 	// Update running time
 	tickTime();
+
+	update_pixels = true;
 
 	// Set heartbeat pin low
 	PORTD &= B11111011;
 }
 
 // Show incoming data sample in the ring
-void sampleToRing(uint8_t sample) {
+void sampleToRing(uint8_t value) {
 	// Indicates the active pixel
-	static uint8_t pixelIndex = 0;
+	static uint8_t index;
 
-	if (sample)
-		pixels.setPixelColor(pixelIndex, SAMPLE_ONE);
+	if (value)
+		pixels.setPixelColor(index, SAMPLE_ONE);
 	else
-		pixels.setPixelColor(pixelIndex, SAMPLE_ZERO);
-	if (++pixelIndex >= 60)
+		pixels.setPixelColor(index, SAMPLE_ZERO);
+
+	index++;
+	if (index >= 60)
+		index = 0;
+
+	pixels.setPixelColor(index, SAMPLE_CURSOR);
+}
+
+void sampleToBuffer(uint8_t value) {
+	sampleBuffer[pixelIndex] = value;
+	pixelIndex++;
+	if (pixelIndex >= 60)
 		pixelIndex = 0;
-	pixels.setPixelColor(pixelIndex, SAMPLE_CURSOR);
 }
 
 // Variables for MODE_SEEK
 uint8_t bitSeek_matchCount = 0;
 int bitSeek_ticksSinceLastSymbol = 0;
-const uint8_t bitSeek_windowMaxTicks = 63;
-const uint8_t bitSeek_windowMinTicks = 57;
+const uint8_t bitSeek_windowMaxTicks = 72;
+const uint8_t bitSeek_windowMinTicks = 48;
 
 // Variables for MODE_SYNC
 uint8_t bitSync_peekCountdown = 60;
@@ -483,7 +602,7 @@ void bitSeek() {
 		// Exceeded detection window with no bit seen. Reset.
 		bitSeek_matchCount = 0;
 		bitSeek_ticksSinceLastSymbol = 0;
-		shiftSymbol('X');
+		shiftSymbol('-');
 		return;
 	}
 
@@ -552,7 +671,7 @@ void bitSync() {
 	}
 	else {
 		// No symbol seen.
-		shiftSymbol('X');
+		shiftSymbol('-');
 		if (--bitSync_syncLossTimeout == 0) {
 			// Sync lost.
 			setMode(MODE_SEEK);
@@ -585,10 +704,13 @@ void bitSync() {
 
 	// Have we accumulated enough delta to adjust?
 	if (bitSync_accumulatedOffset < -12  ||  bitSync_accumulatedOffset > 12) {
-		Serial.print("Adjusting interval");
-		adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
-		bitSync_localTicksSinceSync = 0;
-		bitSync_accumulatedOffset = 0;
+		// Only adjust if local ticks is large enough
+		if (bitSync_localTicksSinceSync > 2000) {
+			Serial.print("Adjusting interval");
+			adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
+			bitSync_localTicksSinceSync = 0;
+			bitSync_accumulatedOffset = 0;
+		}
 	}
 
 	// Next time, peek when next bit should be centered
@@ -1201,6 +1323,7 @@ void setHours(int value) {
 void setTubePwm(uint8_t value) {
 	OCR2B = value;
 }
+
 
 void configureFromMemory() {
 	PersistentParameters params;
