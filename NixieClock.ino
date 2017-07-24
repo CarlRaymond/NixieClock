@@ -39,7 +39,7 @@
 // Symbols are detected by comparing the stored samples with ideal templates of
 // the three possible symbols. A scoring function counts up the number of
 // matching bits, and on each bit shift compares the sampled data to the three templates. At
-// the 60Hz sample rate, a perfect bit pattern for SYMBOL_ZERO would consist of 12 high samples,
+// the 60Hz sample rate, a perfect bit pattern for PATTERN_ZERO would consist of 12 high samples,
 // followed by 48 low samples.
 //
 // The shift register and matching patterns are 80 bits instead of only 60. This allows
@@ -167,6 +167,11 @@ const uint32_t OFF = 0L;
 const uint32_t SAMPLE_ONE = pixels.Color(7, 1, 0);
 const uint32_t SAMPLE_ZERO = pixels.Color(3, 1, 6);
 const uint32_t SAMPLE_CURSOR = pixels.Color(2, 36, 2);
+
+const uint32_t SYMBOL_ZERO = pixels.Color(4, 0, 0);
+const uint32_t SYMBOL_ONE = pixels.Color(1, 4, 0);
+const uint32_t SYMBOL_MARKER = pixels.Color(3, 0, 3);
+
 const uint32_t BACKGROUND = pixels.Color(1, 4, 1);
 const uint32_t RED = pixels.Color(255,0,0);
 const uint32_t ORANGE = pixels.Color(204,51,0);
@@ -191,13 +196,13 @@ volatile uint8_t samples[10];
 // is the most recent bit (the tail end of the pulse), and progress to
 // the oldest bit (the head end).  (Remember: bytes are written LSB first, but bits
 // in a byte are MSB first!)
-uint8_t SYMBOL_ZERO[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x3f, 0x00 };
+uint8_t PATTERN_ZERO[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x3f, 0x00 };
 // Correlaton template for one bit. From head to tail:
 // 10 0s, 30 1s, 30 0s, 10 1s
-uint8_t SYMBOL_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f, 0x00 };
+uint8_t PATTERN_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 // Correlation template for marker bit. From head to tail:
 // 10 0s, 48 1s, 12 0s, 10 1s
-uint8_t SYMBOL_MARKER[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
+uint8_t PATTERN_MARKER[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
 uint8_t scoreThreshold = 69;
@@ -380,7 +385,7 @@ void loop() {
 	}
 
 	if (update_pixels) {
-		updatePixels();
+		updatePixels2();
 		update_pixels = false;
 	}
 }
@@ -401,7 +406,7 @@ void updatePixels() {
 			pixel = SAMPLE_CURSOR;
 
 		if (mode == MODE_SYNC) {
-			// Meter for the SYMBOL_ZERO detector
+			// Meter for the PATTERN_ZERO detector
 			if (i >= 27 &&  i < (27+ScoreBoard::size)) {
 				uint8_t intensity;
 				uint8_t slot = i - 27;
@@ -428,7 +433,7 @@ void updatePixels() {
 				pixel = pixels.Color(r+intensity, g, b+intensity);
 			}
 
-			// Meter for the SYMBOL_ONE detector
+			// Meter for the PATTERN_ONE detector
 			if (i >= 7 && i < (7 + ScoreBoard::size)) {
 				uint8_t intensity;
 				uint8_t slot = i - 7;
@@ -451,7 +456,7 @@ void updatePixels() {
 				pixel = pixels.Color(r+intensity, g, b+intensity);
 			}
 
-			// Meter for the SYMBOL_MARKER detector
+			// Meter for the PATTERN_MARKER detector
 			if (i >= 47 && i < (47 + ScoreBoard::size)) {
 				uint8_t intensity;
 				uint8_t slot = i - 47;
@@ -462,7 +467,7 @@ void updatePixels() {
 					intensity = 10;
 				else if (score > 71)
 					intensity = 6;
-				else if (score > 65) {
+				else if (score > 65)
 					intensity = 4;
 				else
 					intensity = 1;
@@ -474,11 +479,51 @@ void updatePixels() {
 				pixel = pixels.Color(r+intensity, g, b+intensity);
 			}
 		}
-
 		pixels.setPixelColor(i, pixel);
 	}
+}
 
 
+void updatePixels2() {
+	uint32_t color;
+
+	switch (mode) {
+		case MODE_SEEK:
+			// Show incoming samples.
+			for (uint8_t i = 0;  i<60;  i++) {
+				if (pixelIndex == i)
+					color = SAMPLE_CURSOR;
+				else {
+					if (sampleBuffer[i])
+						color = SAMPLE_ONE;
+					else
+						color = SAMPLE_ZERO;
+				}
+				pixels.setPixelColor(i, color);
+			}
+			break;
+
+		case MODE_SYNC:
+			// Show received data bits.
+			for (uint8_t i = 0;  i<60;  i++) {
+				switch(symbolStream[i]) {
+					case '0':
+						color = SYMBOL_ZERO;
+						break;
+					case '1':
+						color = SYMBOL_ONE;
+						break;
+					case 'M':
+						color = SYMBOL_MARKER;
+						break;
+					default:
+						color = OFF;
+				}
+
+				pixels.setPixelColor(i, color);
+			}
+			break;
+	}
 }
 
 
@@ -493,11 +538,11 @@ void tick() {
 	//uint8_t input = fake_frame.nextBit();
 	shiftSample(input);
 
-	uint8_t score_ZERO = score(SYMBOL_ZERO);
+	uint8_t score_ZERO = score(PATTERN_ZERO);
 	scoreboard_zero.shiftScore(score_ZERO);
-	uint8_t score_ONE = score(SYMBOL_ONE);
+	uint8_t score_ONE = score(PATTERN_ONE);
 	scoreboard_one.shiftScore(score_ONE);
-	uint8_t score_MARKER = score(SYMBOL_MARKER);
+	uint8_t score_MARKER = score(PATTERN_MARKER);
 	scoreboard_marker.shiftScore(score_MARKER);
 
 	sampleToBuffer(input);
@@ -1510,75 +1555,75 @@ void printTimeUtc() {
 }
 
 void test_showPatterns() {
-	Serial.print("SYMBOL_ZERO: ");
-	Serial.print(SYMBOL_ZERO[9], BIN);
+	Serial.print("PATTERN_ZERO: ");
+	Serial.print(PATTERN_ZERO[9], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[8], BIN);
+	Serial.print(PATTERN_ZERO[8], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[7], BIN);
+	Serial.print(PATTERN_ZERO[7], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[6], BIN);
+	Serial.print(PATTERN_ZERO[6], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[5], BIN);
+	Serial.print(PATTERN_ZERO[5], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[4], BIN);
+	Serial.print(PATTERN_ZERO[4], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[3], BIN);
+	Serial.print(PATTERN_ZERO[3], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[2], BIN);
+	Serial.print(PATTERN_ZERO[2], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[1], BIN);
+	Serial.print(PATTERN_ZERO[1], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ZERO[0], BIN);
+	Serial.print(PATTERN_ZERO[0], BIN);
 	Serial.print('\n');
 
-	Serial.print("SYMBOL_ONE: ");
-	Serial.print(SYMBOL_ONE[9], BIN);
+	Serial.print("PATTERN_ONE: ");
+	Serial.print(PATTERN_ONE[9], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[8], BIN);
+	Serial.print(PATTERN_ONE[8], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[7], BIN);
+	Serial.print(PATTERN_ONE[7], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[6], BIN);
+	Serial.print(PATTERN_ONE[6], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[5], BIN);
+	Serial.print(PATTERN_ONE[5], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[4], BIN);
+	Serial.print(PATTERN_ONE[4], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[3], BIN);
+	Serial.print(PATTERN_ONE[3], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[2], BIN);
+	Serial.print(PATTERN_ONE[2], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[1], BIN);
+	Serial.print(PATTERN_ONE[1], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_ONE[0], BIN);
+	Serial.print(PATTERN_ONE[0], BIN);
 	Serial.print('\n');
 
-	Serial.print("SYMBOL_MARKER: ");
-	Serial.print(SYMBOL_MARKER[9], BIN);
+	Serial.print("PATTERN_MARKER: ");
+	Serial.print(PATTERN_MARKER[9], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[8], BIN);
+	Serial.print(PATTERN_MARKER[8], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[7], BIN);
+	Serial.print(PATTERN_MARKER[7], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[6], BIN);
+	Serial.print(PATTERN_MARKER[6], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[5], BIN);
+	Serial.print(PATTERN_MARKER[5], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[4], BIN);
+	Serial.print(PATTERN_MARKER[4], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[3], BIN);
+	Serial.print(PATTERN_MARKER[3], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[2], BIN);
+	Serial.print(PATTERN_MARKER[2], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[1], BIN);
+	Serial.print(PATTERN_MARKER[1], BIN);
 	Serial.print(' ');
-	Serial.print(SYMBOL_MARKER[0], BIN);
+	Serial.print(PATTERN_MARKER[0], BIN);
 	Serial.print('\n');
 }
 
 void test_shifter() {
-	// Shift in a simulated SYMBOL_ZERO, then compare to the other patterns
+	// Shift in a simulated PATTERN_ZERO, then compare to the other patterns
 	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
@@ -1594,14 +1639,14 @@ void test_shifter() {
 	}
 
 	Serial.print("ZERO on ZERO: ");
-	Serial.print(score(SYMBOL_ZERO));
+	Serial.print(score(PATTERN_ZERO));
 	Serial.print("\nZERO on ONE: ");
-	Serial.print(score(SYMBOL_ONE));
+	Serial.print(score(PATTERN_ONE));
 	Serial.print("\nZERO on MARKER: ");
-	Serial.print(score(SYMBOL_MARKER));
+	Serial.print(score(PATTERN_MARKER));
 	Serial.print("\n");
 
-	// Shift in a simulated SYMBOL_ONE, then compare to the other patterns
+	// Shift in a simulated PATTERN_ONE, then compare to the other patterns
 	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
@@ -1616,14 +1661,14 @@ void test_shifter() {
 	}
 
 	Serial.print("ONE on ZERO: ");
-	Serial.print(score(SYMBOL_ZERO));
+	Serial.print(score(PATTERN_ZERO));
 	Serial.print("\nONE on ONE: ");
-	Serial.print(score(SYMBOL_ONE));
+	Serial.print(score(PATTERN_ONE));
 	Serial.print("\nONE on MARKER: ");
-	Serial.print(score(SYMBOL_MARKER));
+	Serial.print(score(PATTERN_MARKER));
 	Serial.print("\n");
 
-	// Shift in a simulated SYMBOL_MARKER, then compare to the other patterns
+	// Shift in a simulated PATTERN_MARKER, then compare to the other patterns
 	for (short i=0; i<10; i++) {
 		shiftSample(0);
 	}
@@ -1638,10 +1683,10 @@ void test_shifter() {
 	}
 	
 	Serial.print("MARKER on ZERO: ");
-	Serial.print(score(SYMBOL_ZERO));
+	Serial.print(score(PATTERN_ZERO));
 	Serial.print("\nMARKER on ONE: ");
-	Serial.print(score(SYMBOL_ONE));
+	Serial.print(score(PATTERN_ONE));
 	Serial.print("\nMARKER on MARKER: ");
-	Serial.print(score(SYMBOL_MARKER));
+	Serial.print(score(PATTERN_MARKER));
 	Serial.print("\n");
 }
