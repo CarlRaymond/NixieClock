@@ -168,8 +168,8 @@ const uint32_t SAMPLE_ONE = pixels.Color(7, 1, 0);
 const uint32_t SAMPLE_ZERO = pixels.Color(3, 1, 6);
 const uint32_t SAMPLE_CURSOR = pixels.Color(2, 36, 2);
 
-const uint32_t SYMBOL_ZERO = pixels.Color(4, 0, 0);
-const uint32_t SYMBOL_ONE = pixels.Color(1, 4, 0);
+const uint32_t SYMBOL_ZERO = pixels.Color(6, 0, 0);
+const uint32_t SYMBOL_ONE = pixels.Color(1, 5, 0);
 const uint32_t SYMBOL_MARKER = pixels.Color(3, 0, 3);
 
 const uint32_t BACKGROUND = pixels.Color(1, 4, 1);
@@ -529,9 +529,6 @@ void updatePixels2() {
 
 // Invoked at 60Hz by ISR. Samples incoming data bits, and processes them through the discriminators.
 void tick() {
-	// Set heartbeat pin high
-	PORTD |= B00000100;
-
 	// Sample the input - port D bit 7
 	uint8_t input = (PIND & B10000000) >> 7;
 	//uint8_t input = digitalRead(PIN_WWVB);
@@ -567,9 +564,6 @@ void tick() {
 	tickTime();
 
 	update_pixels = true;
-
-	// Set heartbeat pin low
-	PORTD &= B11111011;
 }
 
 // Show incoming data sample in the ring
@@ -643,13 +637,13 @@ void bitSeek() {
 
 	bitSeek_ticksSinceLastSymbol++;
 
-	if (bitSeek_ticksSinceLastSymbol > bitSeek_windowMaxTicks) {
-		// Exceeded detection window with no bit seen. Reset.
-		bitSeek_matchCount = 0;
-		bitSeek_ticksSinceLastSymbol = 0;
-		shiftSymbol('-');
-		return;
-	}
+	//if (bitSeek_ticksSinceLastSymbol > bitSeek_windowMaxTicks) {
+	//	// Exceeded detection window with no bit seen. Reset.
+	//	bitSeek_matchCount = 0;
+	//	bitSeek_ticksSinceLastSymbol = 0;
+	//	shiftSymbol('-');
+	//	return;
+	//}
 
 	char candidateSymbol = 0;
 
@@ -674,12 +668,12 @@ void bitSeek() {
 	if (candidateSymbol != 0) {
 		// Did it arrive within the window?  Window maximum already checked by timeout;
 		// check against window minimum
-		if (bitSeek_ticksSinceLastSymbol >= bitSeek_windowMinTicks) {
-			// Bit seen within window.
+		//if (bitSeek_ticksSinceLastSymbol >= bitSeek_windowMinTicks) {
+		//	// Bit seen within window.
 			bitSeek_matchCount++;
-			bitSeek_ticksSinceLastSymbol = 0;
+		//	bitSeek_ticksSinceLastSymbol = 0;
 			shiftSymbol(candidateSymbol);
-		}
+		//}
 	}
 
 	if (bitSeek_matchCount == 5) {
@@ -748,8 +742,8 @@ void bitSync() {
 	Serial.print('\n');
 
 	// Have we accumulated enough delta to adjust?
-	if (bitSync_accumulatedOffset < -12  ||  bitSync_accumulatedOffset > 12) {
-		// Only adjust if local ticks is large enough
+	if (bitSync_accumulatedOffset < -16  ||  bitSync_accumulatedOffset > 16) {
+		// Only adjust if local ticks is large enough -- otherwise we overreact to noise
 		if (bitSync_localTicksSinceSync > 2000) {
 			Serial.print("Adjusting interval");
 			adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
@@ -759,7 +753,7 @@ void bitSync() {
 	}
 
 	// Next time, peek when next bit should be centered
-	bitSync_peekCountdown = 60 - offset;
+	bitSync_peekCountdown = 60 + offset;
 
 	// Time to save parameters?  
 	if (bitSync_localTicksSinceSync > 500000  &&  !bitSync_parametersSaved) {
@@ -771,7 +765,7 @@ void bitSync() {
 
 // Udpate the tick interval to compensate for counting actualTicks while
 // expecting to count expectedTicks.  Both parameters should be near each
-// other (+-3). When they are above 8000, the math would overflow a 32-bit
+// other (+-k, for small k). When they are above 8000, the math would overflow a 32-bit
 // integer, so an alternate technique is needed.
 void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) {
 
@@ -1452,6 +1446,10 @@ void configureTimers() {
 
 // Heartbeat interrupt.
 ISR (TIMER1_COMPA_vect) {
+
+	// Set heartbeat pin high
+	PORTD |= B00000100;
+
 	// Current fractional period index. Counts from 0 to tick_frac_denominator-1.
 	// When heartbeat_period < tick_frac_numerator, set counter for a long
 	// period of tick_interval_cycles+1 counts; otherwise, a short period of tick_interval_cycles.
@@ -1473,6 +1471,9 @@ ISR (TIMER1_COMPA_vect) {
 	}
 
 	tick();
+
+	// Set heartbeat pin low
+	PORTD &= B11111011;
 }
 
 // Diagnostic to echo sample data on the terminal. Bytes are space-separated; but
