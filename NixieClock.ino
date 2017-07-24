@@ -170,7 +170,7 @@ const uint32_t SAMPLE_CURSOR = pixels.Color(2, 36, 2);
 
 const uint32_t SYMBOL_ZERO = pixels.Color(6, 0, 0);
 const uint32_t SYMBOL_ONE = pixels.Color(1, 5, 0);
-const uint32_t SYMBOL_MARKER = pixels.Color(3, 0, 3);
+const uint32_t SYMBOL_MARKER = pixels.Color(15, 0, 25);
 
 const uint32_t BACKGROUND = pixels.Color(1, 4, 1);
 const uint32_t RED = pixels.Color(255,0,0);
@@ -314,7 +314,7 @@ void loop() {
 		
 		Serial.print("Valid frame!\n");
 		for (int i=0;  i<60;  i++) {
-			pixels.setPixelColor(i, PINK);
+			pixels.setPixelColor(i, BLUE);
 		}
 		Serial.print('\n');
 
@@ -592,14 +592,13 @@ void sampleToBuffer(uint8_t value) {
 
 // Variables for MODE_SEEK
 uint8_t bitSeek_matchCount = 0;
-int bitSeek_ticksSinceLastSymbol = 0;
 const uint8_t bitSeek_windowMaxTicks = 72;
 const uint8_t bitSeek_windowMinTicks = 48;
 
 // Variables for MODE_SYNC
 uint8_t bitSync_peekCountdown = 60;
 uint32_t bitSync_localTicksSinceSync = 0;
-int8_t bitSync_accumulatedOffset = 0;
+int16_t bitSync_accumulatedOffset = 0;
 bool bitSync_parametersSaved = false;
 
 // Seconds without a bit received remaining before dropping sync
@@ -611,7 +610,6 @@ void setMode(uint8_t newMode) {
 		case MODE_SEEK:
 			// Reset counters
 			bitSeek_matchCount = 0;
-			bitSeek_ticksSinceLastSymbol = 0;
 			setColonColor(PINK);
 			break;
 
@@ -631,19 +629,10 @@ void setMode(uint8_t newMode) {
 
 // Invoked on each tick when in MODE_SEEK. Look for multiple consecutive successful bits. If a bit
 // interval elapses without a bit, reset the match count to 0.
+// We see a bit when one of the scoreboards shows a peak value in the center slot.
 void bitSeek() {
 	uint8_t peakScore;
 	uint8_t peakIndex;
-
-	bitSeek_ticksSinceLastSymbol++;
-
-	//if (bitSeek_ticksSinceLastSymbol > bitSeek_windowMaxTicks) {
-	//	// Exceeded detection window with no bit seen. Reset.
-	//	bitSeek_matchCount = 0;
-	//	bitSeek_ticksSinceLastSymbol = 0;
-	//	shiftSymbol('-');
-	//	return;
-	//}
 
 	char candidateSymbol = 0;
 
@@ -666,25 +655,20 @@ void bitSeek() {
 
 	// Any symbol seen?
 	if (candidateSymbol != 0) {
-		// Did it arrive within the window?  Window maximum already checked by timeout;
-		// check against window minimum
-		//if (bitSeek_ticksSinceLastSymbol >= bitSeek_windowMinTicks) {
-		//	// Bit seen within window.
-			bitSeek_matchCount++;
-		//	bitSeek_ticksSinceLastSymbol = 0;
-			shiftSymbol(candidateSymbol);
-		//}
+		bitSeek_matchCount++;
+		shiftSymbol(candidateSymbol);
 	}
 
+	// Enough bits in a row?
 	if (bitSeek_matchCount == 5) {
-		// Enough consecutive bits seen. Commence syncin' proper.
+		// Commence syncin' proper.
 		setMode(MODE_SYNC);
 	}
 }
 
 // Invoked on each tick when in MODE_SYNC. Let 60 ticks elapse, and look for a
-// symbol match. If max scores slot index changes, indicating drift, recalibrate the tick
-// time interval.
+// symbol match. Detect and accumulate drift, and recalibrate the tick
+// time interval when a drift threshold is exceeded.
 // If we fail to see a symbol for 6 seconds (not ticks), switch back to MODE_SEEK.
 void bitSync() {
 
@@ -1405,7 +1389,6 @@ uint16_t saveParameters(uint16_t address, PersistentParameters *params) {
 
 	uint16_t i;
 	 for (i = 0; i < sizeof(PersistentParameters); i++) {
-	 	Serial.print(*p, HEX);
         EEPROM.write(address++, *p++);
 	 }
     return i;
@@ -1419,7 +1402,6 @@ uint16_t loadParameters(uint16_t address, PersistentParameters *params) {
 	uint16_t i;
 	for (i = 0; i < sizeof(PersistentParameters); i++) {
     	*p = EEPROM.read(address++);
-		Serial.print(*p, HEX);
 		p++;
 	}
     return i;	
