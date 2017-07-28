@@ -7,23 +7,19 @@ ScoreBoard::ScoreBoard() {
 
 void ScoreBoard::shiftScore(uint8_t score) {
 
-	// Shift in new score
-	for (uint8_t i = size-1;  i>0;  i--) {
-		slots[i] = slots[i-1];
-	}
-	slots[0] = score;
-
-	// Find new max value and slot
-	peakValue = slots[0];
+	// Shift in new score, finding new maximum and slot
+	peakValue = score;
 	peakIndex = 0;
 
-	for (uint8_t i=1;  i<size;  i++) {
+	for (uint8_t i = size-1;  i>0;  i--) {
+		slots[i] = slots[i-1];
 		if (slots[i] > peakValue) {
 			peakValue = slots[i];
 			peakIndex = i;
 		}
-	}
 
+	}
+	slots[0] = score;
 }
 
 uint8_t ScoreBoard::getSlotValue(uint8_t slot) {

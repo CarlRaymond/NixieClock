@@ -60,7 +60,7 @@
 // the maximum score of 80 to account for both noise in the received signal, and inaccuracy
 // in the local sampling clock.
 //
-// This sample, shift, and score process happens continuously in the background, at 60Hz, and is
+// This sample, shift, and score process happens continuously in the COLOR_BACKGROUND, at 60Hz, and is
 // the first phase in decoding the bitstream. The second phase consists of watching the
 // constantly changing triples of symbol scores and detecting when they reach a peak.
 // By the nature of the bit shifting, scores will follow a ramp pattern: as the incoming
@@ -71,9 +71,8 @@
 // To find the peaks of the symbols scores, the previous n scores are kept in score history
 // buffers (one buffer for each symbol). These are also shift registers, but hold bytes
 // rather than bits. A peak in the scores is detected by looking for the ramp pattern in
-// the score history. The history buffer size, n, should be an odd number (5? 7? 11?), and
-// the peak finder looks for the case where the peak value is in the middle slot, with
-// decreasing (or at least non-increasing) values on either side.
+// the score history. The history buffer size, n, is an odd number (11), and
+// the peak finder looks for the case where the peak value is in the middle slot.
 //
 // At this point, the data bits can be recognized by the appearance of the peaks in the three
 // symbol scoring buffers. Right after receiving a nice clean bit, one of the three buffers should
@@ -123,13 +122,17 @@ const int PIN_MOSI = 11;
 const int PIN_MISO = 12; // Unused
 const int PIN_SCK = 13;
 
+// Version number for parameters structure.
 const int parametersVersion = 1;
 
 // Parameters for clock that get saved in EEPROM. Version number helps with sanity checking.
 typedef struct {
 	uint8_t version;
-	uint32_t scaledCounts; 
+	uint32_t scaledCounts;
 } PersistentParameters;
+
+// Set true to prevent loading stored parameters at startup.
+bool overrideSavedParameters = false;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count tick_frac_numerator (out of
@@ -149,10 +152,11 @@ volatile uint8_t tick_frac_numerator = 5;
 // A power of 2 to simplify math.
 const uint8_t tick_frac_denominator = 16;
 
-bool overrideSavedParameters = false;
-
 // Communicates to main loop that the heartbeat period changed. Set true during
-// interrupt processing; reset in main loop.
+// interrupt processing; reset in main loop after saving parameters.
+volatile bool unsaved_parameters = false;
+
+// Set true by adjustTickInterval; monitored and reset by main loop.
 volatile bool tick_interval_changed = false;
 
 // First 60 pixels are the ring; the final 10 are the on-board backlight pixels
@@ -160,27 +164,30 @@ Adafruit_NeoPixel pixels = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800
 
 // Holds input samples
 uint8_t sampleBuffer[60];
-uint8_t pixelIndex;
+uint8_t sampleIndex;
 
 // Colors
 const uint32_t OFF = 0L;
-const uint32_t SAMPLE_ONE = pixels.Color(7, 1, 0);
-const uint32_t SAMPLE_ZERO = pixels.Color(3, 1, 6);
-const uint32_t SAMPLE_CURSOR = pixels.Color(2, 36, 2);
+const uint32_t COLOR_SAMPLE_ONE = pixels.Color(7, 1, 0);
+const uint32_t COLOR_SAMPLE_ZERO = pixels.Color(3, 1, 6);
+const uint32_t COLOR_SAMPLE_CURSOR = pixels.Color(2, 36, 2);
 
-const uint32_t SYMBOL_ZERO = pixels.Color(6, 0, 0);
-const uint32_t SYMBOL_ONE = pixels.Color(1, 5, 0);
-const uint32_t SYMBOL_MARKER = pixels.Color(15, 0, 25);
+const uint32_t COLOR_SYMBOL_ZERO = pixels.Color(0, 0, 6);
+const uint32_t COLOR_SYMBOL_ONE = pixels.Color(5, 1, 0);
+const uint32_t COLOR_SYMBOL_MARKER = pixels.Color(1, 2, 1);
 
-const uint32_t BACKGROUND = pixels.Color(1, 4, 1);
-const uint32_t RED = pixels.Color(255,0,0);
-const uint32_t ORANGE = pixels.Color(204,51,0);
-const uint32_t YELLOW = pixels.Color(255,150,0);
-const uint32_t GREEN = pixels.Color(0,255,0);
-const uint32_t BLUE = pixels.Color(0,0,255);
-const uint32_t PURPLE = pixels.Color(96,0,96);
-const uint32_t PINK = pixels.Color(60, 0, 10);
-const uint32_t FLASH = pixels.Color(255, 128, 128);
+const uint32_t COLOR_HAND_HOUR = pixels.Color(40, 0, 0);
+const uint32_t COLOR_HAND_MINUTE = pixels.Color(30, 18, 0);
+
+const uint32_t COLOR_BACKGROUND = pixels.Color(1, 4, 1);
+const uint32_t COLOR_RED = pixels.Color(255,0,0);
+const uint32_t COLOR_ORANGE = pixels.Color(204,51,0);
+const uint32_t COLOR_YELLOW = pixels.Color(255,150,0);
+const uint32_t COLOR_GREEN = pixels.Color(0,255,0);
+const uint32_t COLOR_BLUE = pixels.Color(0,0,255);
+const uint32_t COLOR_PURPLE = pixels.Color(96,0,96);
+const uint32_t COLOR_PINK = pixels.Color(60, 0, 10);
+const uint32_t COLOR_FLASH = pixels.Color(255, 128, 128);
 
 // Six bytes of data for nixies
 volatile uint8_t nixieData[6];
@@ -217,11 +224,12 @@ ScoreBoard scoreboard_marker = ScoreBoard();
 // for WWVB (i.e., Wikipedia), where bit 0 is longest ago, and bit 59 is most recent.
 char symbolStream[60];
 
-// Set true by shiftSymbol; watched by main loop;
+// Set true by shiftSymbol; watched and reset by main loop;
 volatile bool valid_frame = false;
 
-// set true by bitSync; watched by main loop.
+// set true by bitSync; watched and reset by main loop.
 volatile bool save_parameters = false;
+volatile bool tick_interval_saved = false;
 
 // Current time of day, UTC
 volatile unsigned short tod_ticks = 0;
@@ -249,6 +257,21 @@ const uint8_t MODE_SYNC = 1;
 // Current operating mode. Don't directly write it; call setMode().
 volatile uint8_t mode;
 volatile bool mode_changed = false;
+
+// Variables for MODE_SEEK
+uint8_t bitSeek_matchCount = 0;
+const uint8_t bitSeek_windowMaxTicks = 72;
+const uint8_t bitSeek_windowMinTicks = 48;
+
+// Variables for MODE_SYNC
+uint8_t bitSync_peekCountdown = 60;
+uint32_t bitSync_localTicksSinceSync = 0;
+int16_t bitSync_accumulatedOffset = 0;
+bool bitSync_parametersSaved = false;
+
+// Seconds without a bit received remaining before dropping sync
+uint8_t bitSync_syncLossTimeout = 6;
+
 
 // Prepare some fake data.  This represents 10:35am June 1, 2017.
 uint8_t fakedata[] = {
@@ -288,12 +311,11 @@ void setup() {
 
 	// Configure neopixels
 	pixels.begin();
+	pixels.show();
 
 	Serial.begin(230400);
 
-	pixels.show();
-
-	setTubePwm(150);
+	setTubePwm(255);
 
 	if (!overrideSavedParameters)
 		configureFromMemory();
@@ -314,7 +336,7 @@ void loop() {
 		
 		Serial.print("Valid frame!\n");
 		for (int i=0;  i<60;  i++) {
-			pixels.setPixelColor(i, BLUE);
+			pixels.setPixelColor(i, COLOR_BLUE);
 		}
 		Serial.print('\n');
 
@@ -343,17 +365,6 @@ void loop() {
 		tod_changed = false;
 	}
 
-	if (tick_interval_changed) {
-		tick_interval_changed = false;
-		Serial.print ("Pretending to save new tick interval of ");
-		Serial.print(tick_interval_cycles);
-		Serial.print(' ');
-		Serial.print(tick_frac_numerator);
-		Serial.print('/');
-		Serial.print(tick_frac_denominator);
-		Serial.print('\n');
-	}
-
 	if (mode_changed) {
 		mode_changed = false;
 		Serial.print("Mode changed to ");
@@ -372,132 +383,51 @@ void loop() {
 		Serial.print('\n');
 	}
 
-	if (save_parameters) {
-		PersistentParameters params;
-		params.version = parametersVersion;
-		params.scaledCounts = (uint32_t) tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
+	if (tick_interval_changed) {
+		tick_interval_changed = false;
+		Serial.print("New tick interval: ");
+		Serial.print(tick_interval_cycles);
+		Serial.print(' ');
+		Serial.print(tick_frac_numerator);
+		Serial.print('/');
+		Serial.print(tick_frac_denominator);
+		Serial.print('\n');
+	}
 
-		saveParameters(0, &params);
-
-		Serial.print("Saved parameters to EEPROM.\n");
-
-		save_parameters = false;
+	if (unsaved_parameters) {
+		// Have we gone long enough to save the parameters?
+		if (bitSync_localTicksSinceSync > 500000) {
+			PersistentParameters params;
+			params.version = parametersVersion;
+			params.scaledCounts = (uint32_t) tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
+			saveParameters(0, &params);
+			bitSync_parametersSaved = true;
+			Serial.print("Saved parameters to EEPROM.\n");
+			unsaved_parameters = false;
+		}
 	}
 
 	if (update_pixels) {
-		updatePixels2();
+		updatePixels();
 		update_pixels = false;
 	}
 }
 
 
 void updatePixels() {
-
-	uint32_t pixel;
-
-	for (uint8_t i = 0;  i<60;  i++) {
-		pixel = BACKGROUND;
-
-		// Read from pixel buffer
-		if (sampleBuffer[i])
-			pixel = SAMPLE_ONE;
-
-		if (pixelIndex == i)
-			pixel = SAMPLE_CURSOR;
-
-		if (mode == MODE_SYNC) {
-			// Meter for the PATTERN_ZERO detector
-			if (i >= 27 &&  i < (27+ScoreBoard::size)) {
-				uint8_t intensity;
-				uint8_t slot = i - 27;
-				uint8_t score = scoreboard_zero.getSlotValue(slot);
-				if (score > 77) {
-					intensity = 25;
-				}
-				else if (score > 74) {
-					intensity = 16;
-				}
-				else if (score > 71) {
-					intensity = 10;
-				}
-				else if (score > 65) {
-					intensity = 6;
-				}
-				else {
-					intensity = 1;
-				}
-				uint8_t r = pixel & 0x0f00 >> 17;
-				uint8_t g = pixel & 0x00f0 >> 9;
-				uint8_t b = pixel & 0x000f >> 1;
-
-				pixel = pixels.Color(r+intensity, g, b+intensity);
-			}
-
-			// Meter for the PATTERN_ONE detector
-			if (i >= 7 && i < (7 + ScoreBoard::size)) {
-				uint8_t intensity;
-				uint8_t slot = i - 7;
-				uint8_t score = scoreboard_one.getSlotValue(slot);
-				if (score > 77)
-					intensity = 16;
-				else if (score > 74)
-					intensity = 10;
-				else if (score > 71)
-					intensity = 6;
-				else if (score > 65)
-					intensity = 4;
-				else
-					intensity = 1;
-
-				uint8_t r = pixel & 0x0f00 >> 17;
-				uint8_t g = pixel & 0x00f0 >> 9;
-				uint8_t b = pixel & 0x000f >> 1;
-
-				pixel = pixels.Color(r+intensity, g, b+intensity);
-			}
-
-			// Meter for the PATTERN_MARKER detector
-			if (i >= 47 && i < (47 + ScoreBoard::size)) {
-				uint8_t intensity;
-				uint8_t slot = i - 47;
-				uint8_t score = scoreboard_marker.getSlotValue(slot);
-				if (score > 77)
-					intensity = 16;
-				else if (score > 74)
-					intensity = 10;
-				else if (score > 71)
-					intensity = 6;
-				else if (score > 65)
-					intensity = 4;
-				else
-					intensity = 1;
-
-				uint8_t r = pixel & 0x0f00 >> 17;
-				uint8_t g = pixel & 0x00f0 >> 9;
-				uint8_t b = pixel & 0x000f >> 1;
-
-				pixel = pixels.Color(r+intensity, g, b+intensity);
-			}
-		}
-		pixels.setPixelColor(i, pixel);
-	}
-}
-
-
-void updatePixels2() {
 	uint32_t color;
 
 	switch (mode) {
 		case MODE_SEEK:
 			// Show incoming samples.
 			for (uint8_t i = 0;  i<60;  i++) {
-				if (pixelIndex == i)
-					color = SAMPLE_CURSOR;
+				if (sampleIndex == i)
+					color = COLOR_SAMPLE_CURSOR;
 				else {
 					if (sampleBuffer[i])
-						color = SAMPLE_ONE;
+						color = COLOR_SAMPLE_ONE;
 					else
-						color = SAMPLE_ZERO;
+						color = COLOR_SAMPLE_ZERO;
 				}
 				pixels.setPixelColor(i, color);
 			}
@@ -508,13 +438,13 @@ void updatePixels2() {
 			for (uint8_t i = 0;  i<60;  i++) {
 				switch(symbolStream[i]) {
 					case '0':
-						color = SYMBOL_ZERO;
+						color = COLOR_SYMBOL_ZERO;
 						break;
 					case '1':
-						color = SYMBOL_ONE;
+						color = COLOR_SYMBOL_ONE;
 						break;
 					case 'M':
-						color = SYMBOL_MARKER;
+						color = COLOR_SYMBOL_MARKER;
 						break;
 					default:
 						color = OFF;
@@ -522,8 +452,57 @@ void updatePixels2() {
 
 				pixels.setPixelColor(i, color);
 			}
+
 			break;
 	}
+
+	if (tod_fix) {
+		// Get local time in AM/PM form
+		int8_t localHours = tod_hours + tzOffsetHours;
+		int8_t localMinutes = tod_minutes + tzOffsetMinutes;
+		if (localMinutes < 0) {
+			localMinutes += 60;
+			localHours--;
+		}
+		if (localMinutes > 59) {
+			localMinutes -= 60;
+			localHours++;
+		}
+		if (localHours < 0) {
+			localHours += 12;
+		}
+		if (localHours > 11) {
+			localHours -= 12;
+		}
+
+		// Superimpose hour hand
+		uint8_t hourPos = localHours * 5 + (localMinutes / 12) + 21;
+		if (hourPos > 59)
+			hourPos -= 60;
+		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
+		if (++hourPos > 59)
+			hourPos -= 60;
+		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
+		if (++hourPos > 59)
+			hourPos -= 60;
+		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
+
+
+		// Superimpose minute hand
+		uint8_t minutePos = localMinutes + 21;
+		if (minutePos < 0)
+			minutePos += 60;
+		if (minutePos > 59)
+			minutePos -= 60;
+		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
+		if (++minutePos > 59)
+			minutePos -= 60;
+		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
+		if (++minutePos > 59)
+			minutePos -= 60;
+		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
+	}
+
 }
 
 
@@ -531,7 +510,6 @@ void updatePixels2() {
 void tick() {
 	// Sample the input - port D bit 7
 	uint8_t input = (PIND & B10000000) >> 7;
-	//uint8_t input = digitalRead(PIN_WWVB);
 	//uint8_t input = fake_frame.nextBit();
 	shiftSample(input);
 
@@ -556,9 +534,9 @@ void tick() {
 			break;
 	}
 
-	flashZero(score_ZERO);
-	flashOne(score_ONE);
-	flashMarker(score_MARKER);
+	COLOR_FLASHZero(score_ZERO);
+	COLOR_FLASHOne(score_ONE);
+	COLOR_FLASHMarker(score_MARKER);
 
 	// Update running time
 	tickTime();
@@ -566,43 +544,12 @@ void tick() {
 	update_pixels = true;
 }
 
-// Show incoming data sample in the ring
-void sampleToRing(uint8_t value) {
-	// Indicates the active pixel
-	static uint8_t index;
-
-	if (value)
-		pixels.setPixelColor(index, SAMPLE_ONE);
-	else
-		pixels.setPixelColor(index, SAMPLE_ZERO);
-
-	index++;
-	if (index >= 60)
-		index = 0;
-
-	pixels.setPixelColor(index, SAMPLE_CURSOR);
-}
-
 void sampleToBuffer(uint8_t value) {
-	sampleBuffer[pixelIndex] = value;
-	pixelIndex++;
-	if (pixelIndex >= 60)
-		pixelIndex = 0;
+	sampleBuffer[sampleIndex] = value;
+	sampleIndex++;
+	if (sampleIndex >= 60)
+		sampleIndex = 0;
 }
-
-// Variables for MODE_SEEK
-uint8_t bitSeek_matchCount = 0;
-const uint8_t bitSeek_windowMaxTicks = 72;
-const uint8_t bitSeek_windowMinTicks = 48;
-
-// Variables for MODE_SYNC
-uint8_t bitSync_peekCountdown = 60;
-uint32_t bitSync_localTicksSinceSync = 0;
-int16_t bitSync_accumulatedOffset = 0;
-bool bitSync_parametersSaved = false;
-
-// Seconds without a bit received remaining before dropping sync
-uint8_t bitSync_syncLossTimeout = 6;
 
 // Changes the operating mode, updating necessary variables.
 void setMode(uint8_t newMode) {
@@ -610,7 +557,7 @@ void setMode(uint8_t newMode) {
 		case MODE_SEEK:
 			// Reset counters
 			bitSeek_matchCount = 0;
-			setColonColor(PINK);
+			setColonColor(COLOR_PINK);
 			break;
 
 		case MODE_SYNC:
@@ -619,7 +566,7 @@ void setMode(uint8_t newMode) {
 			bitSync_accumulatedOffset = 0;
 			bitSync_parametersSaved = false;
 			bitSync_syncLossTimeout = 6;
-			setColonColor(BLUE);
+			setColonColor(COLOR_BLUE);
 			break;
 	}
 
@@ -634,33 +581,33 @@ void bitSeek() {
 	uint8_t peakScore;
 	uint8_t peakIndex;
 
-	char candidateSymbol = 0;
+	char detectedSymbol = 0;
 
 	// A successful bit has peak in the middle slot
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		if (peakIndex == ScoreBoard::centerIndex) {
-			candidateSymbol = '0';
+			detectedSymbol = '0';
 		}
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		if (peakIndex == ScoreBoard::centerIndex) {
-			candidateSymbol = '1';
+			detectedSymbol = '1';
 		}
 	}
 	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		if (peakIndex == ScoreBoard::centerIndex) {
-			candidateSymbol = 'M';
+			detectedSymbol = 'M';
 		}
 	}
 
 	// Any symbol seen?
-	if (candidateSymbol != 0) {
+	if (detectedSymbol != 0) {
 		bitSeek_matchCount++;
-		shiftSymbol(candidateSymbol);
+		shiftSymbol(detectedSymbol);
 	}
 
 	// Enough bits in a row?
-	if (bitSeek_matchCount == 5) {
+	if (bitSeek_matchCount == 10) {
 		// Commence syncin' proper.
 		setMode(MODE_SYNC);
 	}
@@ -713,13 +660,14 @@ void bitSync() {
 
 	int8_t offset = ScoreBoard::centerIndex - peakIndex;
 
-	Serial.print("Sync offset: ");
-	Serial.print(offset);
-	Serial.print('\n');
-
 	bitSync_accumulatedOffset += offset;
 
-	Serial.print("Accumulated offset: ");
+	// Next time, peek when next bit should be centered
+	bitSync_peekCountdown = 60 + offset;
+
+	Serial.print("Sync offset: ");
+	Serial.print(offset);
+	Serial.print("    Accumulated offset: ");
 	Serial.print(bitSync_accumulatedOffset);
 	Serial.print("    Local ticks: ");
 	Serial.print(bitSync_localTicksSinceSync);
@@ -734,15 +682,6 @@ void bitSync() {
 			bitSync_localTicksSinceSync = 0;
 			bitSync_accumulatedOffset = 0;
 		}
-	}
-
-	// Next time, peek when next bit should be centered
-	bitSync_peekCountdown = 60 + offset;
-
-	// Time to save parameters?  
-	if (bitSync_localTicksSinceSync > 500000  &&  !bitSync_parametersSaved) {
-		save_parameters = true;
-		bitSync_parametersSaved = true;
 	}
 }
 
@@ -813,7 +752,7 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 		Serial.print('\n');
 	}
 
-	// Sanity: bound by +- 5% of 33,333.333
+	// Sanity: bound by +- 5% of 533,333.333
 	//if (updatedCounts < 506666) {
 	//	Serial.print("Bounded from above to 506666\n");
 	//	updatedCounts = 506666;
@@ -828,6 +767,7 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 	tick_interval_cycles = updatedCounts / tick_frac_denominator;
 
 	tick_interval_changed = true;
+	unsaved_parameters = true;
 }
 
 void shiftSymbol(char newSymbol) {
@@ -870,7 +810,7 @@ void shiftSymbol(char newSymbol) {
 		score++;
 
 
-	printSymbols();
+	//printSymbols();
 
 	if (score == 60) {
 		valid_frame = true;
@@ -964,56 +904,56 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 }
 
-void flashZero(int score) {
+void COLOR_FLASHZero(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
 		hold = 24;
-		pixels.setPixelColor(68, PURPLE);
-		pixels.setPixelColor(69, PURPLE);
+		pixels.setPixelColor(68, COLOR_FLASH);
+		pixels.setPixelColor(69, COLOR_FLASH);
 	}
 	else {
 		if (hold > 0)
 			hold--;
 		else {
-			pixels.setPixelColor(68, OFF);
-			pixels.setPixelColor(69, OFF);
+			pixels.setPixelColor(68, COLOR_BLUE);
+			pixels.setPixelColor(69, COLOR_PURPLE);
 		}
 	}
 }
 
-void flashOne(int score) {
+void COLOR_FLASHOne(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
 		hold = 24;
-		pixels.setPixelColor(64, GREEN);
-		pixels.setPixelColor(65, GREEN);
+		pixels.setPixelColor(64, COLOR_FLASH);
+		pixels.setPixelColor(65, COLOR_FLASH);
 	}
 	else {
 		if (hold > 0)
 			hold--;
 		else {
-			pixels.setPixelColor(64, OFF);
-			pixels.setPixelColor(65, OFF);
+			pixels.setPixelColor(64, COLOR_YELLOW);
+			pixels.setPixelColor(65, COLOR_GREEN);
 		}
 	}
 }
 
-void flashMarker(int score) {
+void COLOR_FLASHMarker(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
 		hold = 24;
-		pixels.setPixelColor(60, RED);
-		pixels.setPixelColor(61, RED);
+		pixels.setPixelColor(60, COLOR_FLASH);
+		pixels.setPixelColor(61, COLOR_FLASH);
 	}
 	else {
 		if (hold > 0)
 			hold--;
 		else {
-			pixels.setPixelColor(60, OFF);
-			pixels.setPixelColor(61, OFF);
+			pixels.setPixelColor(60, COLOR_RED);
+			pixels.setPixelColor(61, COLOR_ORANGE);
 		}
 	}
 }
