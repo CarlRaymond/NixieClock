@@ -534,9 +534,9 @@ void tick() {
 			break;
 	}
 
-	COLOR_FLASHZero(score_ZERO);
-	COLOR_FLASHOne(score_ONE);
-	COLOR_FLASHMarker(score_MARKER);
+	flashZero(score_ZERO);
+	flashOne(score_ONE);
+	flashMarker(score_MARKER);
 
 	// Update running time
 	tickTime();
@@ -904,7 +904,7 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 }
 
-void COLOR_FLASHZero(int score) {
+void flashZero(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
@@ -922,7 +922,7 @@ void COLOR_FLASHZero(int score) {
 	}
 }
 
-void COLOR_FLASHOne(int score) {
+void flashOne(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
@@ -940,7 +940,7 @@ void COLOR_FLASHOne(int score) {
 	}
 }
 
-void COLOR_FLASHMarker(int score) {
+void flashMarker(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
