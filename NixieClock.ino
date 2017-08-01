@@ -142,15 +142,10 @@ bool overrideSavedParameters = false;
 // For 60Hz (with prescaler = 8, or 2,000,000Hz clock), count 33,333 1/3
 // cycles. The closest frational value is 33,333 5/16.
 
-// No. of (whole) cycles in a short period
-volatile uint16_t tick_interval_cycles = 33333;
-
-// No. of long periods in full sequence, i.e. fractional part, 0/16 to 15/16
-volatile uint8_t tick_frac_numerator = 5;
-
-// Total no. of periods in full sequence; i.e., denominator of fractional part.
-// A power of 2 to simplify math.
-const uint8_t tick_frac_denominator = 16;
+// 60Hz interval timer value
+volatile uint16_t tick_interval_cycles = 33333;  // Whole cycles
+volatile uint8_t tick_frac_numerator = 5;  // Numerator of fraction (no. of long cycles)
+const uint8_t tick_frac_denominator = 16;  // Denominator of fraction, always power of 2 (no. of long + no. of short cycles)
 
 // Communicates to main loop that the heartbeat period changed. Set true during
 // interrupt processing; reset in main loop after saving parameters.
@@ -224,13 +219,6 @@ ScoreBoard scoreboard_marker = ScoreBoard();
 // for WWVB (i.e., Wikipedia), where bit 0 is longest ago, and bit 59 is most recent.
 char symbolStream[60];
 
-// Set true by shiftSymbol; watched and reset by main loop;
-volatile bool valid_frame = false;
-
-// set true by bitSync; watched and reset by main loop.
-volatile bool save_parameters = false;
-volatile bool tick_interval_saved = false;
-
 // Current time of day, UTC
 volatile unsigned short tod_ticks = 0;
 volatile unsigned short tod_seconds = 0;
@@ -258,20 +246,17 @@ const uint8_t MODE_SYNC = 1;
 volatile uint8_t mode;
 volatile bool mode_changed = false;
 
-// Variables for MODE_SEEK
-uint8_t bitSeek_matchCount = 0;
-const uint8_t bitSeek_windowMaxTicks = 72;
-const uint8_t bitSeek_windowMinTicks = 48;
+// State variables for MODE_SEEK
+uint8_t bitSeek_symbolCount = 0;		// No. of symbols detected 
+const uint8_t bitSeek_symbolThreshold = 10;	// No. of detected symbols needed to change state
 
-// Variables for MODE_SYNC
-uint8_t bitSync_peekCountdown = 60;
+// State variables for MODE_SYNC
+uint8_t bitSync_peekCountdown = 60;		// No. of ticks to wait before peeking at scoreboard for symbol
 uint32_t bitSync_localTicksSinceSync = 0;
 int16_t bitSync_accumulatedOffset = 0;
-bool bitSync_parametersSaved = false;
-
-// Seconds without a bit received remaining before dropping sync
-uint8_t bitSync_syncLossTimeout = 6;
-
+uint8_t bitSync_missedSymbolCounter = 0;	// No. of symbols missed
+const uint8_t bitSync_missedSymbolThreshold = 6;	// No. of missed symbols needed to change state
+bool bitSync_parametersSaved = false;	// Set true when current parameters saved to EEPROM
 
 // Prepare some fake data.  This represents 10:35am June 1, 2017.
 uint8_t fakedata[] = {
@@ -284,8 +269,16 @@ uint8_t fakedata[] = {
 };
 DataGenerator fake_frame = DataGenerator(fakedata, sizeof(fakedata), 0);
 
-// Set true in tick(); watched by main loop;
+// Set true in tick(); watched and reset by main loop.
 volatile bool update_pixels;
+
+// Set true by shiftSymbol(); watched and reset by main loop.
+volatile bool valid_frame = false;
+
+// set true by bitSync(); watched and reset by main loop.
+volatile bool save_parameters = false;
+volatile bool tick_interval_saved = false;
+
 
 // One-time setup at start
 void setup() {
@@ -322,8 +315,6 @@ void setup() {
 
 	setMode(MODE_SEEK);
 }
-
-
 
 // Main processing loop. Polls various aspects, and updates display / writes messages
 // as they change.
@@ -556,7 +547,7 @@ void setMode(uint8_t newMode) {
 	switch (newMode) {
 		case MODE_SEEK:
 			// Reset counters
-			bitSeek_matchCount = 0;
+			bitSeek_symbolCount = 0;
 			setColonColor(COLOR_PINK);
 			break;
 
@@ -565,7 +556,7 @@ void setMode(uint8_t newMode) {
 			bitSync_localTicksSinceSync = 0L;
 			bitSync_accumulatedOffset = 0;
 			bitSync_parametersSaved = false;
-			bitSync_syncLossTimeout = 6;
+			bitSync_missedSymbolCounter = 0;
 			setColonColor(COLOR_BLUE);
 			break;
 	}
@@ -574,9 +565,9 @@ void setMode(uint8_t newMode) {
 	mode_changed = true;
 }
 
-// Invoked on each tick when in MODE_SEEK. Look for multiple consecutive successful bits. If a bit
-// interval elapses without a bit, reset the match count to 0.
-// We see a bit when one of the scoreboards shows a peak value in the center slot.
+// Invoked on each tick when in MODE_SEEK. Look for multiple consecutive successful bits.
+// We see a bit when one of the scoreboards shows a peak value in the center slot. No
+// attempt to detect missing bits.
 void bitSeek() {
 	uint8_t peakScore;
 	uint8_t peakIndex;
@@ -602,19 +593,19 @@ void bitSeek() {
 
 	// Any symbol seen?
 	if (detectedSymbol != 0) {
-		bitSeek_matchCount++;
+		bitSeek_symbolCount++;
 		shiftSymbol(detectedSymbol);
 	}
 
 	// Enough bits in a row?
-	if (bitSeek_matchCount == 10) {
+	if (bitSeek_symbolCount == bitSeek_symbolThreshold) {
 		// Commence syncin' proper.
 		setMode(MODE_SYNC);
 	}
 }
 
-// Invoked on each tick when in MODE_SYNC. Let 60 ticks elapse, and look for a
-// symbol match. Detect and accumulate drift, and recalibrate the tick
+// Invoked on each tick when in MODE_SYNC. Let 60 (+- delta) ticks elapse, and look for a
+// symbol match. Detect and accumulate drift -- when a symbol arrives , and recalibrate the tick
 // time interval when a drift threshold is exceeded.
 // If we fail to see a symbol for 6 seconds (not ticks), switch back to MODE_SEEK.
 void bitSync() {
@@ -629,20 +620,20 @@ void bitSync() {
 
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('0');
-		bitSync_syncLossTimeout = 6;
+		bitSync_missedSymbolCounter = 0;
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('1');
-		bitSync_syncLossTimeout = 6;
+		bitSync_missedSymbolCounter = 0;
 	}
 	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
 		shiftSymbol('M');
-		bitSync_syncLossTimeout = 6;
+		bitSync_missedSymbolCounter = 0;
 	}
 	else {
 		// No symbol seen.
 		shiftSymbol('-');
-		if (--bitSync_syncLossTimeout == 0) {
+		if (++bitSync_missedSymbolCounter == bitSync_missedSymbolThreshold) {
 			// Sync lost.
 			setMode(MODE_SEEK);
 			return;
@@ -656,7 +647,7 @@ void bitSync() {
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
 	// in a different slot means the local oscillator is running fast or slow compared
 	// to the reference.  Accumulate this delta over multiple cycles.  When the delta
-	// reaches a limit, adjust the tick interval.
+	// reaches a limit, adjust the tick counter interval.
 
 	int8_t offset = ScoreBoard::centerIndex - peakIndex;
 
@@ -676,7 +667,7 @@ void bitSync() {
 	// Have we accumulated enough delta to adjust?
 	if (bitSync_accumulatedOffset < -16  ||  bitSync_accumulatedOffset > 16) {
 		// Only adjust if local ticks is large enough -- otherwise we overreact to noise
-		if (bitSync_localTicksSinceSync > 2000) {
+		if (bitSync_localTicksSinceSync > 1000) {
 			Serial.print("Adjusting interval");
 			adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
 			bitSync_localTicksSinceSync = 0;
@@ -772,10 +763,6 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 
 void shiftSymbol(char newSymbol) {
 	uint8_t score = 0;
-
-	//Serial.print("Shifting ");
-	//Serial.print(newSymbol);
-	//Serial.print('\n');
 
 	// Single loop for shifting and scoring. Only check that positions that should have
 	// marker symbol have them, and that non-marker positions do not.
@@ -958,10 +945,10 @@ void flashMarker(int score) {
 	}
 }
 
-// Shifts in a new bit sample into the array. The new bit is the LSB of the value
+// Shifts in a new bit sample into the array. The new bit is the LSB of the passed value.
 void shiftSample(uint8_t value) {
 
-	// Shift sample array left one bit
+	// Assembly language for fastness.
 	asm volatile(
 
 		// Constraints at end of asm block:
