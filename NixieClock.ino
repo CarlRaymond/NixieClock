@@ -170,11 +170,11 @@ uint8_t sampleIndex;
 const uint32_t OFF = 0L;
 const uint32_t COLOR_SAMPLE_ONE = pixels.Color(7, 1, 0);
 const uint32_t COLOR_SAMPLE_ZERO = pixels.Color(3, 1, 6);
-const uint32_t COLOR_SAMPLE_CURSOR = pixels.Color(2, 36, 2);
+const uint32_t COLOR_SAMPLE_CURSOR = pixels.Color(3, 12, 6);
 
 const uint32_t COLOR_SYMBOL_ZERO = pixels.Color(0, 0, 6);
 const uint32_t COLOR_SYMBOL_ONE = pixels.Color(5, 1, 0);
-const uint32_t COLOR_SYMBOL_MARKER = pixels.Color(1, 2, 1);
+const uint32_t COLOR_SYMBOL_MARKER = pixels.Color(1, 3, 1);
 
 const uint32_t COLOR_HAND_HOUR = pixels.Color(40, 0, 0);
 const uint32_t COLOR_HAND_MINUTE = pixels.Color(30, 18, 0);
@@ -315,7 +315,7 @@ void setup() {
 
 	Serial.begin(230400);
 
-	setTubePwm(255);
+	setTubePwm(170);
 
 	if (!overrideSavedParameters)
 		configureFromMemory();
