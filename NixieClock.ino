@@ -60,7 +60,7 @@
 // the maximum score of 80 to account for both noise in the received signal, and inaccuracy
 // in the local sampling clock.
 //
-// This sample, shift, and score process happens continuously in the COLOR_BACKGROUND, at 60Hz, and is
+// This sample, shift, and score process happens continuously in the background, at 60Hz, and is
 // the first phase in decoding the bitstream. The second phase consists of watching the
 // constantly changing triples of symbol scores and detecting when they reach a peak.
 // By the nature of the bit shifting, scores will follow a ramp pattern: as the incoming
@@ -534,9 +534,9 @@ void tick() {
 			break;
 	}
 
-	COLOR_FLASHZero(score_ZERO);
-	COLOR_FLASHOne(score_ONE);
-	COLOR_FLASHMarker(score_MARKER);
+	flashZero(score_ZERO);
+	flashOne(score_ONE);
+	flashMarker(score_MARKER);
 
 	// Update running time
 	tickTime();
@@ -904,7 +904,7 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 }
 
-void COLOR_FLASHZero(int score) {
+void flashZero(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
@@ -922,7 +922,7 @@ void COLOR_FLASHZero(int score) {
 	}
 }
 
-void COLOR_FLASHOne(int score) {
+void flashOne(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
@@ -940,7 +940,7 @@ void COLOR_FLASHOne(int score) {
 	}
 }
 
-void COLOR_FLASHMarker(int score) {
+void flashMarker(int score) {
 	static int hold = 0;
 
 	if (score > scoreThreshold) {
