@@ -141,11 +141,9 @@ bool overrideSavedParameters = false;
 // adding 4 bits of resolution to the counter (from 16 to 20 bits).
 // For 60Hz (with prescaler = 8, or 2,000,000Hz clock), count 33,333 1/3
 // cycles. The closest frational value is 33,333 5/16.
-
-// 60Hz interval timer value
 volatile uint16_t tick_interval_cycles = 33333;  // Whole cycles
 volatile uint8_t tick_frac_numerator = 5;  // Numerator of fraction (no. of long cycles)
-const uint8_t tick_frac_denominator = 16;  // Denominator of fraction, always power of 2 (no. of long + no. of short cycles)
+const uint8_t tick_frac_denominator = 16;  // Denominator of fraction (no. of long + no. of short cycles), always power of 2
 
 // Communicates to main loop that the heartbeat period changed. Set true during
 // interrupt processing; reset in main loop after saving parameters.
@@ -194,16 +192,16 @@ volatile uint8_t samples[10];
 
 // Correlation template for a zero bit, including the trailing 0s of the preceding symbol,
 // and the leading 1s of the following symbol. From head end to tail end:
-// 10 0s, 12 1s, 48 0s, 10 0s.  Initialzing values start with LSB, which
+// 10 zeroes, 12 ones, 48 zeroes, 10 ones.  Initialzing values start with LSB, which
 // is the most recent bit (the tail end of the pulse), and progress to
-// the oldest bit (the head end).  (Remember: bytes are written LSB first, but bits
-// in a byte are MSB first!)
+// the oldest bit (the head end).  (Bytes are written LSB first, but bits in a byte are
+// MSB first!  If you get confused, print this out and read it in a mirror.)
 uint8_t PATTERN_ZERO[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfc, 0x3f, 0x00 };
 // Correlaton template for one bit. From head to tail:
-// 10 0s, 30 1s, 30 0s, 10 1s
+// 10 zeroes, 30 ones, 30 zeroes, 10 ones
 uint8_t PATTERN_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 // Correlation template for marker bit. From head to tail:
-// 10 0s, 48 1s, 12 0s, 10 1s
+// 10 zeroes, 48 oness, 12 zeroes, 10 ones
 uint8_t PATTERN_MARKER[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
@@ -247,14 +245,14 @@ volatile uint8_t mode;
 volatile bool mode_changed = false;
 
 // State variables for MODE_SEEK
-uint8_t bitSeek_symbolCount = 0;		// No. of symbols detected 
-const uint8_t bitSeek_symbolThreshold = 10;	// No. of detected symbols needed to change state
+uint8_t bitSeek_detectedSymbolCount = 0;			// No. of symbols detected since entering state
+const uint8_t bitSeek_detectedSymbolThreshold = 10;	// No. of detected symbols needed to change state
 
 // State variables for MODE_SYNC
 uint8_t bitSync_peekCountdown = 60;		// No. of ticks to wait before peeking at scoreboard for symbol
 uint32_t bitSync_localTicksSinceSync = 0;
 int16_t bitSync_accumulatedOffset = 0;
-uint8_t bitSync_missedSymbolCounter = 0;	// No. of symbols missed
+uint8_t bitSync_missedSymbolCount = 0;				// No. of consecutive symbols missed
 const uint8_t bitSync_missedSymbolThreshold = 6;	// No. of missed symbols needed to change state
 bool bitSync_parametersSaved = false;	// Set true when current parameters saved to EEPROM
 
@@ -270,14 +268,13 @@ uint8_t fakedata[] = {
 DataGenerator fake_frame = DataGenerator(fakedata, sizeof(fakedata), 0);
 
 // Set true in tick(); watched and reset by main loop.
-volatile bool update_pixels;
+volatile bool update_pixels_flag;
 
 // Set true by shiftSymbol(); watched and reset by main loop.
-volatile bool valid_frame = false;
+volatile bool valid_frame_flag = false;
 
 // set true by bitSync(); watched and reset by main loop.
-volatile bool save_parameters = false;
-volatile bool tick_interval_saved = false;
+volatile bool new_parameters_flag = false;
 
 
 // One-time setup at start
@@ -297,7 +294,8 @@ void setup() {
 	pinMode(PIN_WWVB, INPUT);
 	pinMode(PIN_HEARTBEAT, OUTPUT);
 
-	configureTimers();
+	configureTickTimer();
+	configurePwmTimer();
 
 	// Configure SPI pins
 	SPI.begin();
@@ -322,8 +320,8 @@ void setup() {
 // Tick interval period: Stores in EEPROM.
 // Operting mode: Write a message.
 void loop() {
-	if (valid_frame) {
-		valid_frame = false;
+	if (valid_frame_flag) {
+		valid_frame_flag = false;
 		
 		Serial.print("Valid frame!\n");
 		for (int i=0;  i<60;  i++) {
@@ -398,9 +396,9 @@ void loop() {
 		}
 	}
 
-	if (update_pixels) {
+	if (update_pixels_flag) {
 		updatePixels();
-		update_pixels = false;
+		update_pixels_flag = false;
 	}
 }
 
@@ -532,9 +530,10 @@ void tick() {
 	// Update running time
 	tickTime();
 
-	update_pixels = true;
+	update_pixels_flag = true;
 }
 
+// Copy new sample to the buffer, and update the index.
 void sampleToBuffer(uint8_t value) {
 	sampleBuffer[sampleIndex] = value;
 	sampleIndex++;
@@ -542,12 +541,12 @@ void sampleToBuffer(uint8_t value) {
 		sampleIndex = 0;
 }
 
-// Changes the operating mode, updating necessary variables.
+// Change the operating mode, updating necessary variables.
 void setMode(uint8_t newMode) {
 	switch (newMode) {
 		case MODE_SEEK:
 			// Reset counters
-			bitSeek_symbolCount = 0;
+			bitSeek_detectedSymbolCount = 0;
 			setColonColor(COLOR_PINK);
 			break;
 
@@ -556,7 +555,7 @@ void setMode(uint8_t newMode) {
 			bitSync_localTicksSinceSync = 0L;
 			bitSync_accumulatedOffset = 0;
 			bitSync_parametersSaved = false;
-			bitSync_missedSymbolCounter = 0;
+			bitSync_missedSymbolCount = 0;
 			setColonColor(COLOR_BLUE);
 			break;
 	}
@@ -565,49 +564,43 @@ void setMode(uint8_t newMode) {
 	mode_changed = true;
 }
 
-// Invoked on each tick when in MODE_SEEK. Look for multiple consecutive successful bits.
-// We see a bit when one of the scoreboards shows a peak value in the center slot. No
-// attempt to detect missing bits.
+// Invoked on each tick when in MODE_SEEK. Look for multiple successful symbols.
+// We see a symbol when one of the scoreboards shows a peak value in the center slot. No
+// attempt to detect missing symbols.  When we hit the threshold, switch to MODE_SYNC.
 void bitSeek() {
 	uint8_t peakScore;
 	uint8_t peakIndex;
 
 	char detectedSymbol = 0;
 
-	// A successful bit has peak in the middle slot
+	// A successful bit has peak in the middle slot. When the peak is elsewhere, ignore it.
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == ScoreBoard::centerIndex) {
-			detectedSymbol = '0';
-		}
+		if (peakIndex == ScoreBoard::centerIndex) detectedSymbol = '0';
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == ScoreBoard::centerIndex) {
-			detectedSymbol = '1';
-		}
+		if (peakIndex == ScoreBoard::centerIndex) detectedSymbol = '1';
 	}
 	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		if (peakIndex == ScoreBoard::centerIndex) {
-			detectedSymbol = 'M';
-		}
+		if (peakIndex == ScoreBoard::centerIndex) detectedSymbol = 'M';
 	}
 
 	// Any symbol seen?
 	if (detectedSymbol != 0) {
-		bitSeek_symbolCount++;
+		bitSeek_detectedSymbolCount++;
 		shiftSymbol(detectedSymbol);
 	}
 
-	// Enough bits in a row?
-	if (bitSeek_symbolCount == bitSeek_symbolThreshold) {
+	// Enough symbos in a row?
+	if (bitSeek_detectedSymbolCount == bitSeek_detectedSymbolThreshold) {
 		// Commence syncin' proper.
 		setMode(MODE_SYNC);
 	}
 }
 
-// Invoked on each tick when in MODE_SYNC. Let 60 (+- delta) ticks elapse, and look for a
-// symbol match. Detect and accumulate drift -- when a symbol arrives , and recalibrate the tick
-// time interval when a drift threshold is exceeded.
-// If we fail to see a symbol for 6 seconds (not ticks), switch back to MODE_SEEK.
+// Invoked on each tick when in MODE_SYNC. Let 60 (+- offset) ticks elapse, and look for a
+// symbol match. Detect and accumulate drift (when a symbol arrives in an off-center slot)
+// and recalibrate the tick timer interval when a drift threshold is exceeded.
+// If we hit a threshold of missed symbols, switch back to MODE_SEEK.
 void bitSync() {
 
 	bitSync_localTicksSinceSync++;
@@ -618,22 +611,21 @@ void bitSync() {
 	uint8_t peakScore = 0;
 	uint8_t peakIndex = ScoreBoard::centerIndex;
 
+	char detectedSymbol = 0;
+
 	if (scoreboard_zero.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		shiftSymbol('0');
-		bitSync_missedSymbolCounter = 0;
+		detectedSymbol = '0';
 	}
 	else if (scoreboard_one.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		shiftSymbol('1');
-		bitSync_missedSymbolCounter = 0;
+		detectedSymbol = '1';
 	}
 	else if (scoreboard_marker.maxOverThreshold(scoreThreshold, &peakScore, &peakIndex)) {
-		shiftSymbol('M');
-		bitSync_missedSymbolCounter = 0;
+		detectedSymbol = 'M';
 	}
 	else {
 		// No symbol seen.
 		shiftSymbol('-');
-		if (++bitSync_missedSymbolCounter == bitSync_missedSymbolThreshold) {
+		if (++bitSync_missedSymbolCount == bitSync_missedSymbolThreshold) {
 			// Sync lost.
 			setMode(MODE_SEEK);
 			return;
@@ -644,6 +636,10 @@ void bitSync() {
 		return;
 	}
 
+	// Saw a symbol.
+	shiftSymbol(detectedSymbol);
+	bitSync_missedSymbolCount = 0;
+
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
 	// in a different slot means the local oscillator is running fast or slow compared
 	// to the reference.  Accumulate this delta over multiple cycles.  When the delta
@@ -653,7 +649,7 @@ void bitSync() {
 
 	bitSync_accumulatedOffset += offset;
 
-	// Next time, peek when next bit should be centered
+	// Next time, peek when next symbol should be centered
 	bitSync_peekCountdown = 60 + offset;
 
 	Serial.print("Sync offset: ");
@@ -677,17 +673,17 @@ void bitSync() {
 }
 
 
-// Udpate the tick interval to compensate for counting actualTicks while
-// expecting to count expectedTicks.  Both parameters should be near each
-// other (+-k, for small k). When they are above 8000, the math would overflow a 32-bit
-// integer, so an alternate technique is needed.
-void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) {
+// Udpate the tick interval to compensate for counting localTicks while
+// appearing to count apparentTicks.  Both parameters should be near each
+// other (+-k, for small k). When they are above 4000, the math would overflow a 32-bit
+// integer, so an alternate, approximate, technique is needed.
+void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 
-	Serial.print("Adjusting tick interval\n  Actual ticks: ");
-	Serial.print(actualTicks);
+	Serial.print("Adjusting tick interval\n  Local ticks: ");
+	Serial.print(localTicks);
 	Serial.print('\n');
-	Serial.print("  Expected ticks: ");
-	Serial.print(expectedTicks);
+	Serial.print("  Apparent ticks: ");
+	Serial.print(apparentTicks);
 	Serial.print('\n');
 
 	// Combine whole cycles and fraction into scaled integer
@@ -698,9 +694,9 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 
 	unsigned long updatedCounts;
 
-	if (expectedTicks < 4096) {
+	if (apparentTicks < 4096) {
 		// Make a linear update -- won't overflow 32 bits.
-		updatedCounts = (((unsigned long)scaledCounts) * actualTicks) / expectedTicks;
+		updatedCounts = (((unsigned long)scaledCounts) * localTicks) / apparentTicks;
 		Serial.print("  Linear update: ");
 		Serial.print(updatedCounts);
 		Serial.print('\n');
@@ -711,32 +707,33 @@ void adjustTickInterval(unsigned long actualTicks, unsigned long expectedTicks) 
 		// Perform "logarithmic" update: based on the denominator, find the (single)
 		// bit position to twiddle that will move the count toward the desired
 		// value without overshooting.
-		// We're adjusting scaledCounts by a multiplier, 1+(k/d), where d = expectedTicks,
-		// and k = actualTicks - expectedTicks. (By nature of the sync process, k will be a small integer.)
-		// Treat scaledCounts as a 20-bit value, and find the bit position corresponding to 
-		// multiplying by 1/d -- the position where twiddling will adjust the result by not more
-		// than scaledCounts * 1/d.  Multiply that by k, and add to scaledCounts.
+		// We're adjusting scaledCounts by a multiplier, 1+(k/d), where d = apparentTicks,
+		// and k = localTicks - apparentTicks. (By nature of the sync process, k will be a
+		// small integer.) Treat scaledCounts as a 20-bit value, and find the bit position
+		// corresponding to  multiplying by 1/d -- the single bit position where twiddling
+		// will adjust the result by not more than scaledCounts * 1/d.  Multiply that by k,
+		// and add to scaledCounts.
 
-		uint8_t d = 0;
-		if (expectedTicks < 8192)
-			d = 128;
-		else if (expectedTicks < 16384)
-			d = 64;
-		else if (expectedTicks < 32768)
-			d = 32;
-		else if (expectedTicks < 65536)
-			d = 16;
-		else if (expectedTicks < 131072)
-			d = 8;
-		else if (expectedTicks < 262144)
-			d = 4;
-		else if (expectedTicks < 524288)
-			d = 2;
+		uint8_t twiddle = 0;
+		if (apparentTicks < 8192)
+			twiddle = 128;
+		else if (apparentTicks < 16384)
+			twiddle = 64;
+		else if (apparentTicks < 32768)
+			twiddle = 32;
+		else if (apparentTicks < 65536)
+			twiddle = 16;
+		else if (apparentTicks < 131072)
+			twiddle = 8;
+		else if (apparentTicks < 262144)
+			twiddle = 4;
+		else if (apparentTicks < 524288)
+			twiddle = 2;
 		else
-			d = 1;
+			twiddle = 1;
 
-		long k = actualTicks - expectedTicks;
-		updatedCounts = scaledCounts + (d*k);
+		long k = localTicks - apparentTicks;
+		updatedCounts = scaledCounts + (k * twiddle);
 				 
 		Serial.print("  Logarithmic update: ");
 		Serial.print(updatedCounts);
@@ -796,11 +793,10 @@ void shiftSymbol(char newSymbol) {
 	if (newSymbol == 'M' )
 		score++;
 
-
 	//printSymbols();
 
 	if (score == 60) {
-		valid_frame = true;
+		valid_frame_flag = true;
 	}
 }
 
@@ -891,6 +887,7 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 }
 
+// Indicate that we have detected a ZERO symbol.
 void flashZero(int score) {
 	static int hold = 0;
 
@@ -909,6 +906,7 @@ void flashZero(int score) {
 	}
 }
 
+// Indicate that we have detected a ONE symbol.
 void flashOne(int score) {
 	static int hold = 0;
 
@@ -927,6 +925,7 @@ void flashOne(int score) {
 	}
 }
 
+// Indicate that we have detected a MARKER symbol.
 void flashMarker(int score) {
 	static int hold = 0;
 
@@ -1043,17 +1042,17 @@ uint8_t parity[256] = {
 // is number of matching bits between them.
 int score(uint8_t *pattern) {
 
-	int sum = 0;
+	int score = 0;
 	for (int i=0; i<10; i++) {
 		// Compute matching bits: XOR pattern and samples, and complement
-		uint8_t bits = ~(samples[i] ^ pattern[i]);
-		sum += parity[bits];
+		uint8_t matchingBits = ~(samples[i] ^ pattern[i]);
+		score += parity[matchingBits];
 	}
 
-	return sum;
+	return score;
 }
 
-// Increment the time of day
+// Increment the time of day.  Sets tod_changed when tod_seconds changes.
 void tickTime() {
 
 	tod_ticks++;
@@ -1334,7 +1333,7 @@ uint16_t loadParameters(uint16_t address, PersistentParameters *params) {
     return i;	
 }
 
-void configureTimers() {
+void configureTickTimer() {
 
 	// Configure timer 1 to interrupt at 60Hz
  	OCR1A = tick_interval_cycles;
@@ -1345,7 +1344,9 @@ void configureTimers() {
 
     //Set interrupt on compare match
     TIMSK1 |= (1 << OCIE1A);
+}
 
+void configurePwmTimer() {
 	// Configure timer 2 for PWM at 244Hz
 	// Arduino pin 3 is OC2B
 	TCCR2A = _BV(COM2B1) | _BV(COM2B0) | _BV(WGM21) | _BV(WGM20);
@@ -1353,7 +1354,7 @@ void configureTimers() {
 	OCR2B = 255;
 }
 
-// Heartbeat interrupt.
+// Tick interrupt.
 ISR (TIMER1_COMPA_vect) {
 
 	// Set heartbeat pin high
@@ -1367,8 +1368,8 @@ ISR (TIMER1_COMPA_vect) {
 	if (++fraction_counter >= tick_frac_denominator)
 		fraction_counter = 0;
 
-	// Reset the CTC value. For a short period, count CTC_value cycles;
-	// for a long period, count CTC_value+1. 
+	// Reset the CTC value. For a short period, count tick_interval_cycles;
+	// for a long period, count tick_interval_cycles+1. 
     // Set compare value for a short or long cycle. Must set OCR1A to n-1.
 	if (fraction_counter < tick_frac_numerator) {
 		// Long period: n+1-1
