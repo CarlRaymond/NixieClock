@@ -131,7 +131,7 @@ typedef struct {
 	uint32_t scaledCounts;
 } PersistentParameters;
 
-// Set true to prevent loading stored parameters at startup.
+// Set true to prevent loading stored parameters at startup, and storing adjusted parameters.
 bool overrideSavedParameters = false;
 
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
@@ -171,6 +171,8 @@ const uint32_t COLOR_SYMBOL_MARKER = pixels.Color(1, 3, 1);
 
 const uint32_t COLOR_HAND_HOUR = pixels.Color(40, 0, 0);
 const uint32_t COLOR_HAND_MINUTE = pixels.Color(30, 18, 0);
+
+const uint32_t COLOR_SYNC = pixels.Color(6, 0, 6);
 
 const uint32_t COLOR_BACKGROUND = pixels.Color(1, 4, 1);
 const uint32_t COLOR_RED = pixels.Color(255,0,0);
@@ -308,8 +310,21 @@ void setup() {
 
 	setTubePwm(170);
 
-	if (!overrideSavedParameters)
+	if (!overrideSavedParameters) {
 		configureFromMemory();
+		Serial.print("Using stored parameters: ");
+		Serial.print(tick_interval_cycles);
+		Serial.print(' ');
+		Serial.print(tick_frac_numerator);
+		Serial.print("/16\n");
+	}
+	else {
+		Serial.print("Overriding parameters: ");
+		Serial.print(tick_interval_cycles);
+		Serial.print(' ');
+		Serial.print(tick_frac_numerator);
+		Serial.print("/16\n");
+	}
 
 	setMode(MODE_SEEK);
 }
@@ -354,23 +369,23 @@ void loop() {
 		tod_changed = false;
 	}
 
-	if (mode_changed) {
-		mode_changed = false;
-		Serial.print("Mode changed to ");
-		switch(mode) {
-			case MODE_SEEK:
-				Serial.print("MODE_SEEK");
-				break;
-			case MODE_SYNC:
-				Serial.print("MODE_SYNC");
-				break;
-
-			default:
-				Serial.print("unknown mode: ");
-				Serial.print(mode);			
-		}
-		Serial.print('\n');
-	}
+	//if (mode_changed) {
+	//	mode_changed = false;
+	//	Serial.print("Mode changed to ");
+	//	switch(mode) {
+	//		case MODE_SEEK:
+	//			Serial.print("MODE_SEEK");
+	//			break;
+	//		case MODE_SYNC:
+	//			Serial.print("MODE_SYNC");
+	//			break;
+//
+	//		default:
+	//			Serial.print("unknown mode: ");
+	//			Serial.print(mode);			
+	//	}
+	//	Serial.print('\n');
+	//}
 
 	if (tick_interval_changed) {
 		tick_interval_changed = false;
@@ -440,6 +455,19 @@ void updatePixels() {
 				}
 
 				pixels.setPixelColor(i, color);
+			}
+
+			// Superimpose sync offset
+			if (bitSync_accumulatedOffset < 0) {
+				for (uint8_t i = 22+bitSync_accumulatedOffset;  i <= 22;  i++)
+					pixels.setPixelColor(i, COLOR_SYNC);
+			}
+			else if (bitSync_accumulatedOffset > 0) {
+				for (uint8_t i = 22;  i <= 22+bitSync_accumulatedOffset;  i++)
+					pixels.setPixelColor(i, COLOR_SYNC);
+			}
+			else {
+				pixels.setPixelColor(22, COLOR_SYNC);
 			}
 
 			break;
@@ -513,6 +541,10 @@ void tick() {
 
 	pixels.show();
 
+	// Hoisted out of MODE_SYNC to keep sync count across all modes
+	bitSync_localTicksSinceSync++;
+
+
 	switch (mode) {
 		case MODE_SEEK:
 			bitSeek();
@@ -552,8 +584,8 @@ void setMode(uint8_t newMode) {
 
 		case MODE_SYNC:
 			bitSync_peekCountdown = 60;
-			bitSync_localTicksSinceSync = 0L;
-			bitSync_accumulatedOffset = 0;
+			//bitSync_localTicksSinceSync = 0L;
+			//bitSync_accumulatedOffset = 0;
 			bitSync_parametersSaved = false;
 			bitSync_missedSymbolCount = 0;
 			setColonColor(COLOR_BLUE);
@@ -603,7 +635,6 @@ void bitSeek() {
 // If we hit a threshold of missed symbols, switch back to MODE_SEEK.
 void bitSync() {
 
-	bitSync_localTicksSinceSync++;
 	if (--bitSync_peekCountdown > 0)
 		return;
 
@@ -631,6 +662,8 @@ void bitSync() {
 			return;
 		}
 
+		//Serial.print("Missed symbol\n");
+
 		// Try again next second.
 		bitSync_peekCountdown = 60;
 		return;
@@ -652,19 +685,23 @@ void bitSync() {
 	// Next time, peek when next symbol should be centered
 	bitSync_peekCountdown = 60 + offset;
 
-	Serial.print("Sync offset: ");
-	Serial.print(offset);
-	Serial.print("    Accumulated offset: ");
-	Serial.print(bitSync_accumulatedOffset);
-	Serial.print("    Local ticks: ");
-	Serial.print(bitSync_localTicksSinceSync);
-	Serial.print('\n');
+	//Serial.print(detectedSymbol);
+	//Serial.print("    Sync offset: ");
+	//if (offset >= 0)
+	//	Serial.print(' ');
+	//Serial.print(offset);
+	//Serial.print("    Accumulated offset: ");
+	//if (bitSync_accumulatedOffset >= 0)
+	//	Serial.print(' ');
+	//Serial.print(bitSync_accumulatedOffset);
+	//Serial.print("    Local ticks: ");
+	//Serial.print(bitSync_localTicksSinceSync);
+	//Serial.print('\n');
 
 	// Have we accumulated enough delta to adjust?
 	if (bitSync_accumulatedOffset < -16  ||  bitSync_accumulatedOffset > 16) {
 		// Only adjust if local ticks is large enough -- otherwise we overreact to noise
 		if (bitSync_localTicksSinceSync > 1000) {
-			Serial.print("Adjusting interval");
 			adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
 			bitSync_localTicksSinceSync = 0;
 			bitSync_accumulatedOffset = 0;
@@ -681,25 +718,21 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 
 	Serial.print("Adjusting tick interval\n  Local ticks: ");
 	Serial.print(localTicks);
-	Serial.print('\n');
-	Serial.print("  Apparent ticks: ");
+	Serial.print("\n  Apparent ticks: ");
 	Serial.print(apparentTicks);
-	Serial.print('\n');
 
 	// Combine whole cycles and fraction into scaled integer
 	unsigned long scaledCounts = (unsigned long)tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
-	Serial.print("  Scaled counts: ");
+	Serial.print("\n  Current counts: ");
 	Serial.print(scaledCounts);
-	Serial.print('\n');
 
 	unsigned long updatedCounts;
 
 	if (apparentTicks < 4096) {
 		// Make a linear update -- won't overflow 32 bits.
 		updatedCounts = (((unsigned long)scaledCounts) * localTicks) / apparentTicks;
-		Serial.print("  Linear update: ");
+		Serial.print("\n  Linear update: ");
 		Serial.print(updatedCounts);
-		Serial.print('\n');
 
 	}
 	else {
@@ -712,33 +745,52 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 		// small integer.) Treat scaledCounts as a 20-bit value, and find the bit position
 		// corresponding to  multiplying by 1/d -- the single bit position where twiddling
 		// will adjust the result by not more than scaledCounts * 1/d.  Multiply that by k,
-		// and add to scaledCounts.
+		// and add to scaledCounts.  For better resolution, scale the twiddle factor by 16,
+		// then un-scale the adjustment term.
 
-		uint8_t twiddle = 0;
-		if (apparentTicks < 8192)
-			twiddle = 128;
-		else if (apparentTicks < 16384)
-			twiddle = 64;
-		else if (apparentTicks < 32768)
-			twiddle = 32;
+		uint32_t twiddle = 0;
+
+		if (apparentTicks < (1 << 13))
+			twiddle = (1 << 12);
+		else if (apparentTicks < (1 << 14))
+			twiddle = (1 << 11);
+		else if (apparentTicks < (1 << 15))
+			twiddle = (1 << 10);
 		else if (apparentTicks < 65536)
-			twiddle = 16;
+			twiddle = (1 << 9);
 		else if (apparentTicks < 131072)
-			twiddle = 8;
+			twiddle = (1 << 8);
 		else if (apparentTicks < 262144)
-			twiddle = 4;
+			twiddle = (1 << 7);
 		else if (apparentTicks < 524288)
-			twiddle = 2;
+			twiddle = (1 << 6);
+		else if (apparentTicks < 1048576)
+			twiddle = (1 << 5);
+		else if (apparentTicks < 2097152)
+			twiddle = (1 << 4);
+		else if (apparentTicks < 4194304)
+			twiddle = (1 << 3);
+		else if (apparentTicks < 8388608)
+			twiddle = (1 << 2);
+		else if (apparentTicks < (1 << ))
+			twiddle = (1 << 1);
 		else
 			twiddle = 1;
 
 		long k = localTicks - apparentTicks;
-		updatedCounts = scaledCounts + (k * twiddle);
+		long adjustment = (k * twiddle) >> 4;
+		updatedCounts = scaledCounts + adjustment;
 				 
-		Serial.print("  Logarithmic update: ");
+		Serial.print("\n  Logarithmic update: ");
 		Serial.print(updatedCounts);
-		Serial.print('\n');
 	}
+
+	Serial.print("\n  Difference: ");
+	long difference = updatedCounts - scaledCounts;
+	Serial.print(difference);
+	Serial.print(" [");
+	Serial.print(difference, BIN);
+	Serial.print("]\n");
 
 	// Sanity: bound by +- 5% of 533,333.333
 	//if (updatedCounts < 506666) {
@@ -761,21 +813,19 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 void shiftSymbol(char newSymbol) {
 	uint8_t score = 0;
 
+	char outgoingSymbol = symbolStream[0];
+
 	// Single loop for shifting and scoring. Only check that positions that should have
 	// marker symbol have them, and that non-marker positions do not.
 
 	// When markerPos = 0, we're shifting into a marker position. It gets reset to 9
 	// after processing a marker position.
 	uint8_t markerPosCountdown = 10;
+	
 	for (uint8_t i=0;  i<59;  i++) {
 		markerPosCountdown--;
 		char symbol = symbolStream[i+1];
 		symbolStream[i] = symbol;
-		if (i == 0) {
-			// Should be a marker symbol.
-			if (symbol == 'M')
-				score++;
-		}
 		if (markerPosCountdown == 0) {
 			// Should be a marker symbol.
 			if (symbol == 'M')
@@ -788,6 +838,10 @@ void shiftSymbol(char newSymbol) {
 				score++;
 		}
 	}
+
+	// Position 0 is a marker when aligned
+	if (symbolStream[0] == 'M')
+		score++;	
 
 	symbolStream[59] = newSymbol;
 	if (newSymbol == 'M' )
@@ -1301,11 +1355,6 @@ void configureFromMemory() {
 	tick_frac_numerator = params.scaledCounts % tick_frac_denominator;
 	tick_interval_cycles = params.scaledCounts / tick_frac_denominator;
 
-	Serial.print("Using stored parameters: ");
-	Serial.print(tick_interval_cycles);
-	Serial.print(' ');
-	Serial.print(tick_frac_numerator);
-	Serial.print("/16\n");
 }
 
 // Writes a parameters structure to EEPROM.  Returns number of bytes written.
