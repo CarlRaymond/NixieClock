@@ -457,19 +457,6 @@ void updatePixels() {
 				pixels.setPixelColor(i, color);
 			}
 
-			// Superimpose sync offset
-			if (bitSync_accumulatedOffset < 0) {
-				for (uint8_t i = 22+bitSync_accumulatedOffset;  i <= 22;  i++)
-					pixels.setPixelColor(i, COLOR_SYNC);
-			}
-			else if (bitSync_accumulatedOffset > 0) {
-				for (uint8_t i = 22;  i <= 22+bitSync_accumulatedOffset;  i++)
-					pixels.setPixelColor(i, COLOR_SYNC);
-			}
-			else {
-				pixels.setPixelColor(22, COLOR_SYNC);
-			}
-
 			break;
 	}
 
@@ -518,8 +505,21 @@ void updatePixels() {
 		if (++minutePos > 59)
 			minutePos -= 60;
 		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
+
 	}
 
+	// Superimpose sync offset
+	if (bitSync_accumulatedOffset < 0) {
+		for (uint8_t i = 22+bitSync_accumulatedOffset;  i <= 22;  i++)
+			pixels.setPixelColor(i, COLOR_SYNC);
+	}
+	else if (bitSync_accumulatedOffset > 0) {
+		for (uint8_t i = 22;  i <= 22+bitSync_accumulatedOffset;  i++)
+			pixels.setPixelColor(i, COLOR_SYNC);
+	}
+	else {
+		pixels.setPixelColor(22, COLOR_SYNC);
+	}
 }
 
 
@@ -682,6 +682,14 @@ void bitSync() {
 
 	bitSync_accumulatedOffset += offset;
 
+	if (offset != 0) {
+		Serial.print("Accumulated offset: ");
+		Serial.print(bitSync_accumulatedOffset);
+		Serial.print(" , ticks since sync: ");
+		Serial.print(bitSync_localTicksSinceSync);
+		Serial.print('\n');
+	}
+
 	// Next time, peek when next symbol should be centered
 	bitSync_peekCountdown = 60 + offset;
 
@@ -699,7 +707,7 @@ void bitSync() {
 	//Serial.print('\n');
 
 	// Have we accumulated enough delta to adjust?
-	if (bitSync_accumulatedOffset < -16  ||  bitSync_accumulatedOffset > 16) {
+	if (bitSync_accumulatedOffset < -15  ||  bitSync_accumulatedOffset > 15) {
 		// Only adjust if local ticks is large enough -- otherwise we overreact to noise
 		if (bitSync_localTicksSinceSync > 1000) {
 			adjustTickInterval(bitSync_localTicksSinceSync, bitSync_localTicksSinceSync - bitSync_accumulatedOffset);
@@ -727,80 +735,17 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 	Serial.print(scaledCounts);
 
 	unsigned long updatedCounts;
+	updatedCounts = muldiv(scaledCounts, localTicks, apparentTicks);
 
-	if (apparentTicks < 4096) {
-		// Make a linear update -- won't overflow 32 bits.
-		updatedCounts = (((unsigned long)scaledCounts) * localTicks) / apparentTicks;
-		Serial.print("\n  Linear update: ");
-		Serial.print(updatedCounts);
-
-	}
-	else {
-		// Simple calc above would overflow 32 bits.
-		// Perform "logarithmic" update: based on the denominator, find the (single)
-		// bit position to twiddle that will move the count toward the desired
-		// value without overshooting.
-		// We're adjusting scaledCounts by a multiplier, 1+(k/d), where d = apparentTicks,
-		// and k = localTicks - apparentTicks. (By nature of the sync process, k will be a
-		// small integer.) Treat scaledCounts as a 20-bit value, and find the bit position
-		// corresponding to  multiplying by 1/d -- the single bit position where twiddling
-		// will adjust the result by not more than scaledCounts * 1/d.  Multiply that by k,
-		// and add to scaledCounts.  For better resolution, scale the twiddle factor by 16,
-		// then un-scale the adjustment term.
-
-		uint32_t twiddle = 0;
-
-		if (apparentTicks < (1 << 13))
-			twiddle = (1 << 12);
-		else if (apparentTicks < (1 << 14))
-			twiddle = (1 << 11);
-		else if (apparentTicks < (1 << 15))
-			twiddle = (1 << 10);
-		else if (apparentTicks < 65536)
-			twiddle = (1 << 9);
-		else if (apparentTicks < 131072)
-			twiddle = (1 << 8);
-		else if (apparentTicks < 262144)
-			twiddle = (1 << 7);
-		else if (apparentTicks < 524288)
-			twiddle = (1 << 6);
-		else if (apparentTicks < 1048576)
-			twiddle = (1 << 5);
-		else if (apparentTicks < 2097152)
-			twiddle = (1 << 4);
-		else if (apparentTicks < 4194304)
-			twiddle = (1 << 3);
-		else if (apparentTicks < 8388608)
-			twiddle = (1 << 2);
-		else if (apparentTicks < (1 << ))
-			twiddle = (1 << 1);
-		else
-			twiddle = 1;
-
-		long k = localTicks - apparentTicks;
-		long adjustment = (k * twiddle) >> 4;
-		updatedCounts = scaledCounts + adjustment;
-				 
-		Serial.print("\n  Logarithmic update: ");
-		Serial.print(updatedCounts);
-	}
-
+	Serial.print("\nUpdated counts: ");
+	Serial.print(updatedCounts);
 	Serial.print("\n  Difference: ");
+
 	long difference = updatedCounts - scaledCounts;
 	Serial.print(difference);
 	Serial.print(" [");
 	Serial.print(difference, BIN);
 	Serial.print("]\n");
-
-	// Sanity: bound by +- 5% of 533,333.333
-	//if (updatedCounts < 506666) {
-	//	Serial.print("Bounded from above to 506666\n");
-	//	updatedCounts = 506666;
-	//}
-	//if (updatedCounts > 560000) {
-	//	Serial.print("Bounded from below to 560000\n");
-	//	updatedCounts = 560000;
-	//}
 
 	// Convert back to whole cycles and fraction.
 	tick_frac_numerator = updatedCounts % tick_frac_denominator;
@@ -808,6 +753,33 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 
 	tick_interval_changed = true;
 	unsaved_parameters = true;
+}
+
+// Computes (a*b)/c without overflow. Taken from https://stackoverflow.com/a/4144956. Based on
+// ancient Egyptian multiplication, https://en.wikipedia.org/wiki/Ancient_Egyptian_multiplication
+uint32_t muldiv(uint32_t a, uint32_t b, uint32_t c) {
+    uint32_t q = 0;              // the quotient
+    uint32_t r = 0;              // the remainder
+    uint32_t qn = b / c;
+    uint32_t rn = b % c;
+    while(a) {
+        if (a & 1) {
+            q += qn;
+            r += rn;
+            if (r >= c) {
+                q++;
+                r -= c;
+            }
+        }
+        a  >>= 1;
+        qn <<= 1;
+        rn <<= 1;
+        if (rn >= c) {
+            qn++; 
+            rn -= c;
+        }
+    }
+    return q;
 }
 
 void shiftSymbol(char newSymbol) {
