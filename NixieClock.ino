@@ -123,7 +123,7 @@ const int PIN_MISO = 12; // Unused
 const int PIN_SCK = 13;
 
 // Version number for parameters structure.
-const int parametersVersion = 1;
+const int parametersVersion = 2;
 
 // Parameters for clock that get saved in EEPROM. Version number helps with sanity checking.
 typedef struct {
@@ -137,13 +137,13 @@ bool overrideSavedParameters = false;
 // Heartbeat counter. Timer1 will produce interrupts at 60Hz, using
 // "fractional PLL" technique.  Count tick_frac_numerator (out of
 // tick_frac_denominator) intervals using tick_interval_cycles+1, and the remainder
-// using tick_interval_cycles. The denominator of the fraction is 16, effectively
-// adding 4 bits of resolution to the counter (from 16 to 20 bits).
+// using tick_interval_cycles. The denominator of the fraction is 64, effectively
+// adding 6 bits of resolution to the counter (from 16 to 22 bits).
 // For 60Hz (with prescaler = 8, or 2,000,000Hz clock), count 33,333 1/3
-// cycles. The closest frational value is 33,333 5/16.
+// cycles. The closest frational value is 33,333 21/64.
 volatile uint16_t tick_interval_cycles = 33333;  // Whole cycles
-volatile uint8_t tick_frac_numerator = 5;  // Numerator of fraction (no. of long cycles)
-const uint8_t tick_frac_denominator = 16;  // Denominator of fraction (no. of long + no. of short cycles), always power of 2
+volatile uint8_t tick_frac_numerator = 21;  // Numerator of fraction (no. of long cycles)
+const uint8_t tick_frac_denominator = 64;  // Denominator of fraction (no. of long + no. of short cycles), always power of 2
 
 // Communicates to main loop that the heartbeat period changed. Set true during
 // interrupt processing; reset in main loop after saving parameters.
@@ -316,14 +316,18 @@ void setup() {
 		Serial.print(tick_interval_cycles);
 		Serial.print(' ');
 		Serial.print(tick_frac_numerator);
-		Serial.print("/16\n");
+		Serial.print('/');
+		Serial.print(tick_frac_denominator);
+		Serial.print('\n');
 	}
 	else {
 		Serial.print("Overriding parameters: ");
 		Serial.print(tick_interval_cycles);
 		Serial.print(' ');
 		Serial.print(tick_frac_numerator);
-		Serial.print("/16\n");
+		Serial.print('/');
+		Serial.print(tick_frac_denominator);
+		Serial.print('\n');
 	}
 
 	setMode(MODE_SEEK);
@@ -1307,25 +1311,35 @@ void configureFromMemory() {
 
 	// Load up with defaults in case loaded params look weird.
 	tick_interval_cycles = 33333;
-	tick_frac_numerator = 5;  // 5/16
+	tick_frac_numerator = 21;  // 21/64
 
 	// Validate.
-	if (params.version != 1) {
-		Serial.print("configureFromMemory: bad version.  Expected 1; found ");
+	if (params.version < 1 || params.version > 2) {
+		Serial.print("configureFromMemory: bad version.  Expected 1 or 2; found ");
 		Serial.print(params.version);
 		return;
 	}
 
 	// Bound within 5% of standard
-	if (params.scaledCounts < 506666  ||  params.scaledCounts > 560000) {
-		Serial.print("configureFromMemory: scaledCount out of range. Found ");
-		Serial.print(params.scaledCounts);
-		return;
-	}
+	// if (params.scaledCounts < 506666  ||  params.scaledCounts > 560000) {
+	// 	Serial.print("configureFromMemory: scaledCount out of range. Found ");
+	// 	Serial.print(params.scaledCounts);
+	// 	return;
+	// }
 
 	// Use params.
-	tick_frac_numerator = params.scaledCounts % tick_frac_denominator;
-	tick_interval_cycles = params.scaledCounts / tick_frac_denominator;
+	switch (params.version) {
+		case 1:
+		tick_frac_numerator = (params.scaledCounts % 16) * 4;  // Adjust from n/16 to m/64
+		tick_interval_cycles = params.scaledCounts / 16;
+		break;
+
+		case 2:
+		tick_frac_numerator = params.scaledCounts % 64;
+		tick_interval_cycles = params.scaledCounts / 64;
+		break;
+
+	}
 
 }
 
