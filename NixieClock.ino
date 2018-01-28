@@ -20,6 +20,9 @@
 // WWVB Data (in):			7
 // 60Hz heartbeat (out):	2
 
+// Rotary pushbutton		14
+// Rotary A					15
+// Rotary B					16
 
 // Theory of operation:
 // The WWVB bitstream consists of data symbols which last one second each. A full word,
@@ -69,7 +72,7 @@
 // waveform pattern shifts past the ideal form of the template.
 // 
 // To find the peaks of the symbols scores, the previous n scores are kept in score history
-// buffers (one buffer for each symbol). These are also shift registers, but hold bytes
+// buffers (one buffer for each symbol). These are also shift registers, but backlightHold bytes
 // rather than bits. A peak in the scores is detected by looking for the ramp pattern in
 // the score history. The history buffer size, n, is an odd number (11), and
 // the peak finder looks for the case where the peak value is in the middle slot.
@@ -122,6 +125,10 @@ const int PIN_MOSI = 11;
 const int PIN_MISO = 12; // Unused
 const int PIN_SCK = 13;
 
+const int PIN_ROT_PB = 14;
+const int PIN_ROT_A = 15;
+const int PIN_ROT_B = 16;
+
 // Version number for parameters structure.
 const int parametersVersion = 2;
 
@@ -152,8 +159,9 @@ volatile bool unsaved_parameters = false;
 // Set true by adjustTickInterval; monitored and reset by main loop.
 volatile bool tick_interval_changed = false;
 
-// First 60 pixels are the ring; the final 10 are the on-board backlight pixels
-Adafruit_NeoPixel pixels = Adafruit_NeoPixel(70, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
+// First pixel is the rotary encoder; next 60 pixels are the ring;
+// the final 10 are the on-board backlight pixels
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(71, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
 // Holds input samples
 uint8_t sampleBuffer[60];
@@ -172,7 +180,7 @@ const uint32_t COLOR_SYMBOL_MARKER = pixels.Color(1, 3, 1);
 const uint32_t COLOR_HAND_HOUR = pixels.Color(40, 0, 0);
 const uint32_t COLOR_HAND_MINUTE = pixels.Color(30, 18, 0);
 
-const uint32_t COLOR_SYNC = pixels.Color(6, 0, 6);
+const uint32_t COLOR_SYNC = pixels.Color(3, 0, 6);
 
 const uint32_t COLOR_BACKGROUND = pixels.Color(1, 4, 1);
 const uint32_t COLOR_RED = pixels.Color(255,0,0);
@@ -207,7 +215,7 @@ uint8_t PATTERN_ONE[10] = { 0xff, 0x03, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x3f
 uint8_t PATTERN_MARKER[10] = { 0xff, 0x03, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x3f, 0x00 };
 
 // Pattern matching threshold
-uint8_t scoreThreshold = 69;
+uint8_t scoreThreshold = 70;
 
 // Score history buffers
 ScoreBoard scoreboard_zero = ScoreBoard();
@@ -226,16 +234,22 @@ volatile unsigned short tod_minutes = 0;
 volatile unsigned short tod_hours = 0;
 volatile unsigned int tod_day = 0;
 volatile unsigned int tod_year = 0;
-volatile bool tod_isdst = true;
+volatile bool tod_isdst = false;
 volatile bool tod_isleapminute = false;
 volatile bool tod_isleapyear = false;
-volatile bool tod_changed = false;
+volatile bool tod_secondChanged = false;
+volatile bool tod_minuteChanged = false;
+volatile uint32_t tod_color = 0;
 
 // Set true when time has been decoded
 volatile bool tod_fix = false;
 
+// Set true on pushbutton and rotation
+volatile bool rotary_pb_pressed = false;
+volatile bool rotary_turned = false;
+
 // Set your time zone here!
-int8_t tzOffsetHours = -4;
+int8_t tzOffsetHours = -5;
 int8_t tzOffsetMinutes = 0;
 
 // Operating modes
@@ -278,6 +292,12 @@ volatile bool valid_frame_flag = false;
 // set true by bitSync(); watched and reset by main loop.
 volatile bool new_parameters_flag = false;
 
+// Holds previous currentEncoderData read from encoder port
+volatile byte lastEncoderData = 0x00;
+// Shift register for decoding quadrature transitions in lower 4 bits
+volatile byte encoderDataRegister = 0x00;
+
+volatile byte encoderValue = 127;
 
 // One-time setup at start
 void setup() {
@@ -296,6 +316,19 @@ void setup() {
 	pinMode(PIN_WWVB, INPUT);
 	pinMode(PIN_HEARTBEAT, OUTPUT);
 
+	pinMode(PIN_ROT_PB, INPUT);
+	pinMode(PIN_ROT_A, INPUT);
+	pinMode(PIN_ROT_B, INPUT);
+
+	// Enable pin change interrupts on rotary contrl
+	*digitalPinToPCMSK(PIN_ROT_PB) |= bit (digitalPinToPCMSKbit(PIN_ROT_PB));
+	*digitalPinToPCMSK(PIN_ROT_A) |= bit (digitalPinToPCMSKbit(PIN_ROT_A));
+	*digitalPinToPCMSK(PIN_ROT_B) |= bit (digitalPinToPCMSKbit(PIN_ROT_B));
+	// clear any outstanding interrupt
+	PCIFR  |= bit (digitalPinToPCICRbit(PIN_ROT_PB));
+	// enable interrupt for the group
+	PCICR  |= bit (digitalPinToPCICRbit(PIN_ROT_PB));
+
 	configureTickTimer();
 	configurePwmTimer();
 
@@ -306,6 +339,7 @@ void setup() {
 	pixels.begin();
 	pixels.show();
 
+	setBacklightRainbow();
 	Serial.begin(230400);
 
 	setTubePwm(170);
@@ -338,12 +372,13 @@ void setup() {
 // Time of day: Updates numeric display.
 // Tick interval period: Stores in EEPROM.
 // Operting mode: Write a message.
+// Rotary control: do things.
 void loop() {
 	if (valid_frame_flag) {
 		valid_frame_flag = false;
 		
 		Serial.print("Valid frame!\n");
-		for (int i=0;  i<60;  i++) {
+		for (int i=1;  i<=60;  i++) {
 			pixels.setPixelColor(i, COLOR_BLUE);
 		}
 		Serial.print('\n');
@@ -363,14 +398,19 @@ void loop() {
 		printTimeUtc();
 	}
 
-	if (tod_changed) {
+	if (tod_minuteChanged) {
+		tod_color = minuteColor(tod_hours, tod_minutes);
+		tod_minuteChanged = false;
+	}
+
+	if (tod_secondChanged) {
 		if (tod_fix)
-			updateTimeOfDayLocal(tzOffsetHours, tzOffsetMinutes, true);
+			updateTimeOfDayLocal(tzOffsetHours, tzOffsetMinutes, false);
 		else
 			updateTimeOfDayUtc();
 
 		updateNixies();
-		tod_changed = false;
+		tod_secondChanged = false;
 	}
 
 	//if (mode_changed) {
@@ -419,6 +459,16 @@ void loop() {
 		updatePixels();
 		update_pixels_flag = false;
 	}
+
+	if (rotary_pb_pressed) {
+		Serial.print("Pressed!\n");
+		rotary_pb_pressed = false;
+	}
+
+	if (rotary_turned) {
+		Serial.print(encoderValue);
+		rotary_turned = false;
+	}
 }
 
 
@@ -437,7 +487,7 @@ void updatePixels() {
 					else
 						color = COLOR_SAMPLE_ZERO;
 				}
-				pixels.setPixelColor(i, color);
+				pixels.setPixelColor(i+1, color);
 			}
 			break;
 
@@ -458,7 +508,7 @@ void updatePixels() {
 						color = OFF;
 				}
 
-				pixels.setPixelColor(i, color);
+				pixels.setPixelColor(i+1, color);
 			}
 
 			break;
@@ -484,7 +534,7 @@ void updatePixels() {
 		}
 
 		// Superimpose hour hand
-		uint8_t hourPos = localHours * 5 + (localMinutes / 12) + 21;
+		uint8_t hourPos = localHours * 5 + (localMinutes / 12) + 22;
 		if (hourPos > 59)
 			hourPos -= 60;
 		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
@@ -497,7 +547,7 @@ void updatePixels() {
 
 
 		// Superimpose minute hand
-		uint8_t minutePos = localMinutes + 21;
+		uint8_t minutePos = localMinutes + 22;
 		if (minutePos < 0)
 			minutePos += 60;
 		if (minutePos > 59)
@@ -510,19 +560,23 @@ void updatePixels() {
 			minutePos -= 60;
 		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
 
+		// Backlight color
+		setBacklightColor(tod_color);
 	}
 
-	// Superimpose sync offset
-	if (bitSync_accumulatedOffset < 0) {
-		for (uint8_t i = 22+bitSync_accumulatedOffset;  i <= 22;  i++)
-			pixels.setPixelColor(i, COLOR_SYNC);
-	}
-	else if (bitSync_accumulatedOffset > 0) {
-		for (uint8_t i = 22;  i <= 22+bitSync_accumulatedOffset;  i++)
-			pixels.setPixelColor(i, COLOR_SYNC);
-	}
-	else {
-		pixels.setPixelColor(22, COLOR_SYNC);
+	if (mode == MODE_SYNC) {
+		// Superimpose sync offset
+		if (bitSync_accumulatedOffset < 0) {
+			for (uint8_t i = 23+bitSync_accumulatedOffset;  i <= 23;  i++)
+				pixels.setPixelColor(i, COLOR_SYNC);
+		}
+		else if (bitSync_accumulatedOffset > 0) {
+			for (uint8_t i = 23;  i <= 23+bitSync_accumulatedOffset;  i++)
+				pixels.setPixelColor(i, COLOR_SYNC);
+		}
+		else {
+			pixels.setPixelColor(23, COLOR_SYNC);
+		}
 	}
 }
 
@@ -559,9 +613,9 @@ void tick() {
 			break;
 	}
 
-	flashZero(score_ZERO);
-	flashOne(score_ONE);
-	flashMarker(score_MARKER);
+	//flashZero(score_ZERO);
+	//flashOne(score_ONE);
+	//flashMarker(score_MARKER);
 
 	// Update running time
 	tickTime();
@@ -680,8 +734,9 @@ void bitSync() {
 	// Are we getting out of sync?  A peak in the middle slot is right on time; a peak
 	// in a different slot means the local oscillator is running fast or slow compared
 	// to the reference.  Accumulate this delta over multiple cycles.  When the delta
-	// reaches a limit, adjust the tick counter interval.
-
+	// reaches a limit, adjust the tick counter interval to compensate.
+	// Positive offset means the local clock is running fast (interval value too small);
+	// negative offset means it's running slow (interval too big).
 	int8_t offset = ScoreBoard::centerIndex - peakIndex;
 
 	bitSync_accumulatedOffset += offset;
@@ -694,7 +749,7 @@ void bitSync() {
 		Serial.print('\n');
 	}
 
-	// Next time, peek when next symbol should be centered
+	// Next time, peek when next symbol should be centered again.
 	bitSync_peekCountdown = 60 + offset;
 
 	//Serial.print(detectedSymbol);
@@ -724,8 +779,7 @@ void bitSync() {
 
 // Udpate the tick interval to compensate for counting localTicks while
 // appearing to count apparentTicks.  Both parameters should be near each
-// other (+-k, for small k). When they are above 4000, the math would overflow a 32-bit
-// integer, so an alternate, approximate, technique is needed.
+// other (+-k, for small k).
 void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 
 	Serial.print("Adjusting tick interval\n  Local ticks: ");
@@ -836,10 +890,10 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 	// Decode the symbol word in the buffer, and set the time. Adjust by the tickDelta value.
 	uint8_t minutes = 0;
 	uint8_t hours = 0;
-	uint8_t daynum = 0;
+	uint16_t daynum = 0;
 	uint8_t year = 2000;
 	bool leapYear = false;
-
+	
 	// Symbols are stored as '0' and '1' characters; LSB for 0 symbol is 0, and LSB for 1 symbol is 1.
 	if (symbolStream[1] & 0x01) minutes += 40;
 	if (symbolStream[2] & 0x01) minutes += 20;
@@ -917,59 +971,73 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 }
 
+// Sets color of tube backlight pixels
+void setBacklightColor(uint32_t color)
+{
+		pixels.setPixelColor(61, color);
+		pixels.setPixelColor(62, color);
+		pixels.setPixelColor(65, color);
+		pixels.setPixelColor(66, color);
+		pixels.setPixelColor(69, color);
+		pixels.setPixelColor(70, color);
+}
+
+// Restore backlights to rainbow pattern
+void setBacklightRainbow()
+{
+			pixels.setPixelColor(61, COLOR_RED);
+			pixels.setPixelColor(62, COLOR_ORANGE);
+			pixels.setPixelColor(65, COLOR_YELLOW);
+			pixels.setPixelColor(66, COLOR_GREEN);
+			pixels.setPixelColor(69, COLOR_BLUE);
+			pixels.setPixelColor(70, COLOR_PURPLE);
+}
+
+int8_t backlightHold = 0;
 // Indicate that we have detected a ZERO symbol.
 void flashZero(int score) {
-	static int hold = 0;
 
 	if (score > scoreThreshold) {
-		hold = 24;
-		pixels.setPixelColor(68, COLOR_FLASH);
-		pixels.setPixelColor(69, COLOR_FLASH);
+		backlightHold = 60;
+		setBacklightColor(COLOR_SAMPLE_ZERO);
 	}
 	else {
-		if (hold > 0)
-			hold--;
+		if (backlightHold > 0)
+			backlightHold--;
 		else {
-			pixels.setPixelColor(68, COLOR_BLUE);
-			pixels.setPixelColor(69, COLOR_PURPLE);
+			setBacklightRainbow();
 		}
 	}
 }
 
 // Indicate that we have detected a ONE symbol.
 void flashOne(int score) {
-	static int hold = 0;
 
 	if (score > scoreThreshold) {
-		hold = 24;
-		pixels.setPixelColor(64, COLOR_FLASH);
-		pixels.setPixelColor(65, COLOR_FLASH);
+		backlightHold = 60;
+		setBacklightColor(COLOR_SYMBOL_ONE);
 	}
 	else {
-		if (hold > 0)
-			hold--;
+		if (backlightHold > 0)
+			backlightHold--;
 		else {
-			pixels.setPixelColor(64, COLOR_YELLOW);
-			pixels.setPixelColor(65, COLOR_GREEN);
+			setBacklightRainbow();
 		}
 	}
 }
 
 // Indicate that we have detected a MARKER symbol.
 void flashMarker(int score) {
-	static int hold = 0;
 
 	if (score > scoreThreshold) {
-		hold = 24;
-		pixels.setPixelColor(60, COLOR_FLASH);
-		pixels.setPixelColor(61, COLOR_FLASH);
+		backlightHold = 60;
+		setBacklightColor(COLOR_SYMBOL_MARKER);
 	}
 	else {
-		if (hold > 0)
-			hold--;
+		if (backlightHold > 0)
+			backlightHold--;
 		else {
-			pixels.setPixelColor(60, COLOR_RED);
-			pixels.setPixelColor(61, COLOR_ORANGE);
+			setBacklightRainbow();
 		}
 	}
 }
@@ -1045,7 +1113,7 @@ void shiftSample(uint8_t value) {
 // Array, indexed from 0..255, where each byte contains the number of 1 bits
 // in the corresponding index. Used by score function to sum the number of
 // matching bits in pattern comparisons.
-uint8_t parity[256] = {
+uint8_t arity[256] = {
 	0,	1,	1,	2,	1,	2,	2,	3,	1,	2,	2,	3,	2,	3,	3,	4,		// 0x00..0x0f
 	1,	2,	2,	3,	2,	3,	3,	4,	2,	3,	3,	4,	3,	4,	4,	5,		// 0x10..0x1f (+1)
 	1,	2,	2,	3,	2,	3,	3,	4,	2,	3,	3,	4,	3,	4,	4,	5,		// 0x20..0x2f (+1)
@@ -1076,13 +1144,13 @@ int score(uint8_t *pattern) {
 	for (int i=0; i<10; i++) {
 		// Compute matching bits: XOR pattern and samples, and complement
 		uint8_t matchingBits = ~(samples[i] ^ pattern[i]);
-		score += parity[matchingBits];
+		score += arity[matchingBits];
 	}
 
 	return score;
 }
 
-// Increment the time of day.  Sets tod_changed when tod_seconds changes.
+// Increment the time of day.  Sets tod_secondChanged when tod_seconds changes.
 void tickTime() {
 
 	tod_ticks++;
@@ -1096,7 +1164,7 @@ void tickTime() {
 	if (tod_ticks < 60)
 		return;
 
-	tod_changed = true;
+	tod_secondChanged = true;
 
 	tod_ticks = 0;
 	tod_seconds++;
@@ -1111,15 +1179,23 @@ void tickTime() {
 	tod_isleapminute = false;
 	tod_seconds = 0;
 	tod_minutes++;
+	tod_minuteChanged = true;
+
 	if (tod_minutes < 60)
+	{
 		return;
+	}
 
 	tod_minutes = 0;
 	tod_hours++;
 	if (tod_hours < 24)
+	{
 		return;
+	}
 
 	tod_hours = 0;
+
+
 	tod_day++;
 
 	unsigned int year_length = 365;
@@ -1134,10 +1210,10 @@ void tickTime() {
 }
 
 void setColonColor(uint32_t color) {
-	pixels.setPixelColor(62, color);
 	pixels.setPixelColor(63, color);
-	pixels.setPixelColor(66, color);
+	pixels.setPixelColor(64, color);
 	pixels.setPixelColor(67, color);
+	pixels.setPixelColor(68, color);
 }
 
 
@@ -1303,6 +1379,70 @@ void setTubePwm(uint8_t value) {
 	OCR2B = value;
 }
 
+// Scale 0 - 479 to 0 - 255
+uint8_t scale480(uint16_t val)
+{
+	// mutlply by 256/480 = 8/15
+	// 1/15 = 0.0001000100010001...
+	// 8/15 = 0.10001000100010001...
+
+	uint32_t prod = val + (val << 4) + (val << 8) + (val << 12) + (val << 16);
+	uint8_t result = prod >> 17;
+
+	Serial.print("Mapping ");
+	Serial.print(val);
+	Serial.print(" to ");
+	Serial.println(result);
+
+	return result;
+}
+
+// Map hour and minute into a color
+uint32_t minuteColor(uint8_t hours, uint8_t minutes) {
+	uint16_t min = hours * 60 + minutes;
+	uint8_t q;
+
+	if (min < 480) {
+		// Midnight to 8:00am
+		// Red to blue
+		q = scale480(min);
+		return pixels.Color(255-q, 0, q);
+	}
+
+	min -= 480;
+	if (min < 480) {
+		// 8:00am to 4:00pm
+		// Blue to green
+		q = scale480(min);
+		return pixels.Color(0, q, 255-q);
+	}
+
+	min -= 480;
+	// 4:00pm to midnight
+	// Green to red
+	q = scale480(min);
+	return pixels.Color(q, 255-q, 0);
+}
+
+// Input a value 1 to 366 to get a color value.
+// The colours are a transition r - g - b - back to r.
+uint32_t dayColor(uint16_t n) {
+  uint16_t q;
+  n = 366 - n;
+
+  if(n < 122) {
+	  q = n * 2;
+    return pixels.Color(255 - q, 0, q * 2);
+  }
+  if(n < 244) {
+    n -= 122;
+	q = n * 2;
+    return pixels.Color(0, q * 2, 255 - q * 2);
+  }
+  n -= 244;
+  q = n * 2;
+  return pixels.Color(q, 255 - q, 0);
+}
 
 void configureFromMemory() {
 	PersistentParameters params;
@@ -1389,7 +1529,7 @@ void configurePwmTimer() {
 	OCR2B = 255;
 }
 
-// Tick interrupt.
+// 60Hz tick interrupt.
 ISR (TIMER1_COMPA_vect) {
 
 	// Set heartbeat pin high
@@ -1420,6 +1560,79 @@ ISR (TIMER1_COMPA_vect) {
 	// Set heartbeat pin low
 	PORTD &= B11111011;
 }
+
+// Pin change interrupt for PORT C: Button was pressed/released, or
+// the encoder was rotated.
+ISR(PCINT1_vect)
+{
+  // Get current data
+  byte currentEncoderData = PINC & 0x07;
+  byte diff = currentEncoderData ^ lastEncoderData;
+
+  // Did pushbutton bit change?
+  if (diff & 0x01) {
+    // Up or down?
+    if (currentEncoderData & 0x01) {
+		// Down
+		rotary_pb_pressed = true;
+    	//Serial.print('D');  // Down
+	}
+    else {
+		// Up
+    	//Serial.print('U');  // Up
+	}
+  }
+
+  // Did rotary bits change?
+  if (diff & 0x06) {
+    // Read two quadrature bits and shift into register.  Keep prior two bits; mask off the rest
+    byte encBits = (PINC & 0x06) >> 1;
+    encoderDataRegister = ((encoderDataRegister << 2) | encBits ) & 0x0f;
+
+    // Figure out what happened.
+    switch (encoderDataRegister) {
+      // Clockwise cases:
+      case 0x01:  // 00 -> 01
+      case 0x07:  // 01 -> 11
+      case 0x0e:  // 11 -> 10
+      case 0x08:  // 10 -> 00
+        //Serial.print('>');
+		// Update value after complete quadrature cycle.
+        if ((encBits & 0x03) == 0) {
+          encoderValue++;
+          //Serial.print('[');
+		  //Serial.print(encoderValue);
+		  //Serial.print(']');
+		  rotary_turned = true;
+        }
+        break;
+
+      // Counterclockwise cases:
+      case 0x0b:  // 10 -> 11
+      case 0x0d:  // 11 -> 01
+      case 0x04:  // 01 -> 00
+      case 0x02:  // 00 -> 10
+        //Serial.print('<');
+		// Update value after complete quadrature cycle.
+        if ((encBits & 0x03) == 0) {
+          encoderValue--;
+          //Serial.print('[');
+		  //Serial.print(encoderValue);
+		  //Serial.print(']');
+		  rotary_turned = true;
+        }
+        break;
+
+      // Other cases are invalid. Ignore.
+      default:
+        //Serial.print('-');
+        break;
+    } 
+  }
+
+  lastEncoderData = currentEncoderData;
+}
+
 
 // Diagnostic to echo sample data on the terminal. Bytes are space-separated; but
 // leading zeroes are omitted; remember to mentally fill in enough zeroes on each segment to make 8 bits.
