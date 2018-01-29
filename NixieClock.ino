@@ -111,7 +111,7 @@ const int PIN_PWM = 3;
 // HV supply /enable
 const int PIN_HV = 5;
 
-// Ring serial output
+// Pixel chain serial output
 const int PIN_PIXEL = 6;
 
 // SYMTRIK input pin
@@ -128,6 +128,7 @@ const int PIN_SCK = 13;
 const int PIN_ROT_PB = 14;
 const int PIN_ROT_A = 15;
 const int PIN_ROT_B = 16;
+
 
 // Version number for parameters structure.
 const int parametersVersion = 2;
@@ -159,9 +160,15 @@ volatile bool unsaved_parameters = false;
 // Set true by adjustTickInterval; monitored and reset by main loop.
 volatile bool tick_interval_changed = false;
 
+// Offset of pixel segments
 // First pixel is the rotary encoder; next 60 pixels are the ring;
 // the final 10 are the on-board backlight pixels
-Adafruit_NeoPixel pixels = Adafruit_NeoPixel(71, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
+const int PIXEL_OFFSET_ENCODER = 0;		// 1 pixel
+const int PIXEL_OFFSET_RING = 1;		// 60 pixels
+const int PIXEL_OFFSET_BACKLIGHT = 61;	// 10 pixels
+const int PIXEL_COUNT = 71;
+
+Adafruit_NeoPixel pixels = Adafruit_NeoPixel(PIXEL_COUNT, PIN_PIXEL, NEO_GRB + NEO_KHZ800);
 
 // Holds input samples
 uint8_t sampleBuffer[60];
@@ -244,9 +251,11 @@ volatile uint32_t tod_color = 0;
 // Set true when time has been decoded
 volatile bool tod_fix = false;
 
-// Set true on pushbutton and rotation
-volatile bool rotary_pb_pressed = false;
-volatile bool rotary_turned = false;
+// Set true on encoder button presses and rotation
+volatile bool rotary_down = false;
+volatile bool rotary_released = false;
+volatile bool rotary_cw = false;
+volatile bool rotary_ccw = false;
 
 // Set your time zone here!
 int8_t tzOffsetHours = -5;
@@ -271,6 +280,9 @@ int16_t bitSync_accumulatedOffset = 0;
 uint8_t bitSync_missedSymbolCount = 0;				// No. of consecutive symbols missed
 const uint8_t bitSync_missedSymbolThreshold = 6;	// No. of missed symbols needed to change state
 bool bitSync_parametersSaved = false;	// Set true when current parameters saved to EEPROM
+
+// Tube PWM value
+uint8_t tube_pwm = 170;
 
 // Prepare some fake data.  This represents 10:35am June 1, 2017.
 uint8_t fakedata[] = {
@@ -378,8 +390,8 @@ void loop() {
 		valid_frame_flag = false;
 		
 		Serial.print("Valid frame!\n");
-		for (int i=1;  i<=60;  i++) {
-			pixels.setPixelColor(i, COLOR_BLUE);
+		for (int i=0;  i<60;  i++) {
+			pixels.setPixelColor(i+PIXEL_OFFSET_RING, COLOR_RED);
 		}
 		Serial.print('\n');
 
@@ -460,15 +472,35 @@ void loop() {
 		update_pixels_flag = false;
 	}
 
-	if (rotary_pb_pressed) {
-		Serial.print("Pressed!\n");
-		rotary_pb_pressed = false;
+	if (rotary_down) {
+		// Change display mode
+		if (mode == MODE_SEEK) {
+			setMode(MODE_SYNC);
+		}
+		else {
+			setMode(MODE_SEEK);
+		}
+		rotary_down = false;
 	}
 
-	if (rotary_turned) {
-		Serial.print(encoderValue);
-		rotary_turned = false;
+	if (rotary_cw) {
+		// Increase brightness
+		if (tube_pwm < 180) {
+			tube_pwm += 5;
+			setTubePwm(tube_pwm);
+		}
+		rotary_cw = false;
 	}
+
+	if (rotary_ccw) {
+		// Decrease brightness
+		if (tube_pwm > 10) {
+			tube_pwm -= 5;
+			setTubePwm(tube_pwm);
+		}
+		rotary_ccw = false;
+	}
+
 }
 
 
@@ -487,7 +519,7 @@ void updatePixels() {
 					else
 						color = COLOR_SAMPLE_ZERO;
 				}
-				pixels.setPixelColor(i+1, color);
+				pixels.setPixelColor(i+PIXEL_OFFSET_RING, color);
 			}
 			break;
 
@@ -508,80 +540,80 @@ void updatePixels() {
 						color = OFF;
 				}
 
-				pixels.setPixelColor(i+1, color);
+				pixels.setPixelColor(i+PIXEL_OFFSET_RING, color);
 			}
 
 			break;
 	}
 
-	if (tod_fix) {
-		// Get local time in AM/PM form
-		int8_t localHours = tod_hours + tzOffsetHours;
-		int8_t localMinutes = tod_minutes + tzOffsetMinutes;
-		if (localMinutes < 0) {
-			localMinutes += 60;
-			localHours--;
+	if (mode == MODE_SYNC) {
+		// Superimpose sync offset
+		if (bitSync_accumulatedOffset < 0) {
+			for (uint8_t i = 22+bitSync_accumulatedOffset;  i <= 22;  i++)
+				pixels.setPixelColor(i+PIXEL_OFFSET_RING, COLOR_SYNC);
 		}
-		if (localMinutes > 59) {
-			localMinutes -= 60;
-			localHours++;
+		else if (bitSync_accumulatedOffset > 0) {
+			for (uint8_t i = 22;  i <= 22+bitSync_accumulatedOffset;  i++)
+				pixels.setPixelColor(i+PIXEL_OFFSET_RING, COLOR_SYNC);
 		}
-		if (localHours < 0) {
-			localHours += 12;
+		else {
+			pixels.setPixelColor(22+PIXEL_OFFSET_RING, COLOR_SYNC);
 		}
-		if (localHours > 11) {
-			localHours -= 12;
-		}
+	
+		if (tod_fix) {
+			// Get local time in AM/PM form
+			int8_t localHours = tod_hours + tzOffsetHours;
+			int8_t localMinutes = tod_minutes + tzOffsetMinutes;
+			if (localMinutes < 0) {
+				localMinutes += 60;
+				localHours--;
+			}
+			if (localMinutes > 59) {
+				localMinutes -= 60;
+				localHours++;
+			}
+			if (localHours < 0) {
+				localHours += 12;
+			}
+			if (localHours > 11) {
+				localHours -= 12;
+			}
 
-		// Superimpose hour hand
-		uint8_t hourPos = localHours * 5 + (localMinutes / 12) + 22;
-		if (hourPos > 59)
-			hourPos -= 60;
-		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
-		if (++hourPos > 59)
-			hourPos -= 60;
-		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
-		if (++hourPos > 59)
-			hourPos -= 60;
-		pixels.setPixelColor(hourPos, COLOR_HAND_HOUR);
+			// Superimpose hour hand
+			uint8_t hourPos = localHours * 5 + (localMinutes / 12) + 21;
+			if (hourPos > 59)
+				hourPos -= 60;
+			pixels.setPixelColor(hourPos+PIXEL_OFFSET_RING, COLOR_HAND_HOUR);
+			if (++hourPos > 59)
+				hourPos -= 60;
+			pixels.setPixelColor(hourPos+PIXEL_OFFSET_RING, COLOR_HAND_HOUR);
+			if (++hourPos > 59)
+				hourPos -= 60;
+			pixels.setPixelColor(hourPos+PIXEL_OFFSET_RING, COLOR_HAND_HOUR);
 
 
-		// Superimpose minute hand
-		uint8_t minutePos = localMinutes + 22;
-		if (minutePos < 0)
-			minutePos += 60;
-		if (minutePos > 59)
-			minutePos -= 60;
-		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
-		if (++minutePos > 59)
-			minutePos -= 60;
-		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
-		if (++minutePos > 59)
-			minutePos -= 60;
-		pixels.setPixelColor(minutePos, COLOR_HAND_MINUTE);
+			// Superimpose minute hand
+			uint8_t minutePos = localMinutes + 21;
+			if (minutePos < 0)
+				minutePos += 60;
+			if (minutePos > 59)
+				minutePos -= 60;
+			pixels.setPixelColor(minutePos+PIXEL_OFFSET_RING, COLOR_HAND_MINUTE);
+			if (++minutePos > 59)
+				minutePos -= 60;
+			pixels.setPixelColor(minutePos+PIXEL_OFFSET_RING, COLOR_HAND_MINUTE);
+			if (++minutePos > 59)
+				minutePos -= 60;
+			pixels.setPixelColor(minutePos+PIXEL_OFFSET_RING, COLOR_HAND_MINUTE);
+		}
 
 		// Backlight color
 		setBacklightColor(tod_color);
 	}
-
-	if (mode == MODE_SYNC) {
-		// Superimpose sync offset
-		if (bitSync_accumulatedOffset < 0) {
-			for (uint8_t i = 23+bitSync_accumulatedOffset;  i <= 23;  i++)
-				pixels.setPixelColor(i, COLOR_SYNC);
-		}
-		else if (bitSync_accumulatedOffset > 0) {
-			for (uint8_t i = 23;  i <= 23+bitSync_accumulatedOffset;  i++)
-				pixels.setPixelColor(i, COLOR_SYNC);
-		}
-		else {
-			pixels.setPixelColor(23, COLOR_SYNC);
-		}
-	}
 }
 
 
-// Invoked at 60Hz by ISR. Samples incoming data bits, and processes them through the discriminators.
+// Invoked at 60Hz by ISR. Samples incoming data bits, and passes them through the discriminators.
 void tick() {
 	// Sample the input - port D bit 7
 	uint8_t input = (PIND & B10000000) >> 7;
@@ -974,23 +1006,23 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 // Sets color of tube backlight pixels
 void setBacklightColor(uint32_t color)
 {
-		pixels.setPixelColor(61, color);
-		pixels.setPixelColor(62, color);
-		pixels.setPixelColor(65, color);
-		pixels.setPixelColor(66, color);
-		pixels.setPixelColor(69, color);
-		pixels.setPixelColor(70, color);
+		pixels.setPixelColor(0+PIXEL_OFFSET_BACKLIGHT, color);
+		pixels.setPixelColor(1+PIXEL_OFFSET_BACKLIGHT, color);
+		pixels.setPixelColor(4+PIXEL_OFFSET_BACKLIGHT, color);
+		pixels.setPixelColor(5+PIXEL_OFFSET_BACKLIGHT, color);
+		pixels.setPixelColor(8+PIXEL_OFFSET_BACKLIGHT, color);
+		pixels.setPixelColor(9+PIXEL_OFFSET_BACKLIGHT, color);
 }
 
 // Restore backlights to rainbow pattern
 void setBacklightRainbow()
 {
-			pixels.setPixelColor(61, COLOR_RED);
-			pixels.setPixelColor(62, COLOR_ORANGE);
-			pixels.setPixelColor(65, COLOR_YELLOW);
-			pixels.setPixelColor(66, COLOR_GREEN);
-			pixels.setPixelColor(69, COLOR_BLUE);
-			pixels.setPixelColor(70, COLOR_PURPLE);
+			pixels.setPixelColor(0+PIXEL_OFFSET_BACKLIGHT, COLOR_RED);
+			pixels.setPixelColor(1+PIXEL_OFFSET_BACKLIGHT, COLOR_ORANGE);
+			pixels.setPixelColor(4+PIXEL_OFFSET_BACKLIGHT, COLOR_YELLOW);
+			pixels.setPixelColor(5+PIXEL_OFFSET_BACKLIGHT, COLOR_GREEN);
+			pixels.setPixelColor(8+PIXEL_OFFSET_BACKLIGHT, COLOR_BLUE);
+			pixels.setPixelColor(9+PIXEL_OFFSET_BACKLIGHT, COLOR_PURPLE);
 }
 
 int8_t backlightHold = 0;
@@ -1210,10 +1242,10 @@ void tickTime() {
 }
 
 void setColonColor(uint32_t color) {
-	pixels.setPixelColor(63, color);
-	pixels.setPixelColor(64, color);
-	pixels.setPixelColor(67, color);
-	pixels.setPixelColor(68, color);
+	pixels.setPixelColor(2+PIXEL_OFFSET_BACKLIGHT, color);
+	pixels.setPixelColor(3+PIXEL_OFFSET_BACKLIGHT, color);
+	pixels.setPixelColor(6+PIXEL_OFFSET_BACKLIGHT, color);
+	pixels.setPixelColor(7+PIXEL_OFFSET_BACKLIGHT, color);
 }
 
 
@@ -1574,12 +1606,12 @@ ISR(PCINT1_vect)
     // Up or down?
     if (currentEncoderData & 0x01) {
 		// Down
-		rotary_pb_pressed = true;
     	//Serial.print('D');  // Down
+		rotary_down = true;
 	}
     else {
 		// Up
-    	//Serial.print('U');  // Up
+		rotary_released = true;
 	}
   }
 
@@ -1599,11 +1631,11 @@ ISR(PCINT1_vect)
         //Serial.print('>');
 		// Update value after complete quadrature cycle.
         if ((encBits & 0x03) == 0) {
-          encoderValue++;
-          //Serial.print('[');
-		  //Serial.print(encoderValue);
-		  //Serial.print(']');
-		  rotary_turned = true;
+			encoderValue++;
+			//Serial.print('[');
+			//Serial.print(encoderValue);
+			//Serial.print(']');
+			rotary_cw = true;
         }
         break;
 
@@ -1619,7 +1651,7 @@ ISR(PCINT1_vect)
           //Serial.print('[');
 		  //Serial.print(encoderValue);
 		  //Serial.print(']');
-		  rotary_turned = true;
+		  rotary_ccw = true;
         }
         break;
 
