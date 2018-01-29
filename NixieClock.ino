@@ -411,7 +411,9 @@ void loop() {
 	}
 
 	if (tod_minuteChanged) {
-		tod_color = minuteColor(tod_hours, tod_minutes);
+		if (tod_fix) {
+			tod_color = minuteColor(tod_hours, tod_minutes);
+		}
 		tod_minuteChanged = false;
 	}
 
@@ -605,10 +607,11 @@ void updatePixels() {
 			if (++minutePos > 59)
 				minutePos -= 60;
 			pixels.setPixelColor(minutePos+PIXEL_OFFSET_RING, COLOR_HAND_MINUTE);
+
+			// Backlight color
+			setBacklightColor(tod_color);
 		}
 
-		// Backlight color
-		setBacklightColor(tod_color);
 	}
 }
 
