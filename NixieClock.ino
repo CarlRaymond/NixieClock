@@ -391,7 +391,7 @@ void loop() {
 		
 		Serial.print("Valid frame!\n");
 		for (int i=0;  i<60;  i++) {
-			pixels.setPixelColor(i+PIXEL_OFFSET_RING, COLOR_RED);
+			pixels.setPixelColor(i+PIXEL_OFFSET_RING, tod_color);
 		}
 		Serial.print('\n');
 
@@ -610,6 +610,7 @@ void updatePixels() {
 
 			// Backlight color
 			setBacklightColor(tod_color);
+			setColonColor(tod_color);
 		}
 
 	}
@@ -672,7 +673,7 @@ void setMode(uint8_t newMode) {
 		case MODE_SEEK:
 			// Reset counters
 			bitSeek_detectedSymbolCount = 0;
-			setColonColor(COLOR_PINK);
+			//setColonColor(COLOR_PINK);
 			break;
 
 		case MODE_SYNC:
@@ -681,7 +682,7 @@ void setMode(uint8_t newMode) {
 			//bitSync_accumulatedOffset = 0;
 			bitSync_parametersSaved = false;
 			bitSync_missedSymbolCount = 0;
-			setColonColor(COLOR_BLUE);
+			//setColonColor(COLOR_BLUE);
 			break;
 	}
 
@@ -1420,14 +1421,16 @@ uint8_t scale480(uint16_t val)
 	// mutlply by 256/480 = 8/15
 	// 1/15 = 0.0001000100010001...
 	// 8/15 = 0.10001000100010001...
-
-	uint32_t prod = val + (val << 4) + (val << 8) + (val << 12) + (val << 16);
+	uint32_t longVal = val;
+	uint32_t prod = longVal + (longVal << 4) + (longVal << 8) + (longVal << 12) + (longVal << 16);
 	uint8_t result = prod >> 17;
 
-	Serial.print("Mapping ");
-	Serial.print(val);
-	Serial.print(" to ");
-	Serial.println(result);
+	//Serial.print("Mapping ");
+	//Serial.print(val);
+	//Serial.print(": prod=");
+	//Serial.print(prod);
+	//Serial.print(". Result=");
+	//Serial.println(result);
 
 	return result;
 }
