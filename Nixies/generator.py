@@ -35,10 +35,12 @@ activeLayers = [];
 inactiveLayers = [];
 insertPos = 3;
 
-# Create active and inactive version of every layer
+# Create active and inactive version of every layer.
+# Ensure layer is visible
 for idx, fil in enumerate(filaments):
 	layer = deepcopy(active);
 	layer.set("{" + ns["inkscape"] + "}label", fil);
+	layer.set("style", "display:inline");
 	tspan = layer.find("svg:text/svg:tspan", ns);
 	tspan.text = fil
 	activeLayers.append(layer);
