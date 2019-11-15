@@ -260,6 +260,7 @@ volatile bool rotary_ccw = false;
 // Set your time zone here!
 int8_t tzOffsetHours = -5;
 int8_t tzOffsetMinutes = 0;
+bool observeDst = true;
 
 // Operating modes
 const uint8_t MODE_SEEK = 0;
@@ -280,6 +281,7 @@ int16_t bitSync_accumulatedOffset = 0;
 uint8_t bitSync_missedSymbolCount = 0;				// No. of consecutive symbols missed
 const uint8_t bitSync_missedSymbolThreshold = 6;	// No. of missed symbols needed to change state
 bool bitSync_parametersSaved = false;	// Set true when current parameters saved to EEPROM
+uint32_t bitSync_localTicksSinceParameterSave = 0;
 
 // Tube PWM value
 uint8_t tube_pwm = 170;
@@ -320,6 +322,7 @@ void setup() {
 	// HV power supply
 	pinMode(PIN_HV, OUTPUT);
 	digitalWrite(PIN_HV, LOW); // HV on
+	//digitalWrite(PIN_HV, HIGH); // HV off
 
 	pinMode(PIN_RCK, OUTPUT);
 	digitalWrite(PIN_RCK, LOW);
@@ -332,7 +335,7 @@ void setup() {
 	pinMode(PIN_ROT_A, INPUT);
 	pinMode(PIN_ROT_B, INPUT);
 
-	// Enable pin change interrupts on rotary contrl
+	// Enable pin change interrupts on rotary control
 	*digitalPinToPCMSK(PIN_ROT_PB) |= bit (digitalPinToPCMSKbit(PIN_ROT_PB));
 	*digitalPinToPCMSK(PIN_ROT_A) |= bit (digitalPinToPCMSKbit(PIN_ROT_A));
 	*digitalPinToPCMSK(PIN_ROT_B) |= bit (digitalPinToPCMSKbit(PIN_ROT_B));
@@ -418,8 +421,13 @@ void loop() {
 	}
 
 	if (tod_secondChanged) {
-		if (tod_fix)
-			updateTimeOfDayLocal(tzOffsetHours, tzOffsetMinutes, false);
+		if (tod_fix) {
+			if (observeDst && tod_isdst)
+				updateTimeOfDayLocal(tzOffsetHours+1, tzOffsetMinutes, false);
+			else
+				updateTimeOfDayLocal(tzOffsetHours, tzOffsetMinutes, false);
+			
+		}
 		else
 			updateTimeOfDayUtc();
 
@@ -458,13 +466,14 @@ void loop() {
 
 	if (unsaved_parameters) {
 		// Have we gone long enough to save the parameters?
-		if (bitSync_localTicksSinceSync > 500000) {
+		if (bitSync_localTicksSinceParameterSave > 500000) {
 			PersistentParameters params;
 			params.version = parametersVersion;
 			params.scaledCounts = (uint32_t) tick_interval_cycles * tick_frac_denominator + tick_frac_numerator;
 			saveParameters(0, &params);
 			bitSync_parametersSaved = true;
 			Serial.print("Saved parameters to EEPROM.\n");
+      bitSync_localTicksSinceParameterSave = 0;
 			unsaved_parameters = false;
 		}
 	}
@@ -637,7 +646,7 @@ void tick() {
 
 	// Hoisted out of MODE_SYNC to keep sync count across all modes
 	bitSync_localTicksSinceSync++;
-
+  bitSync_localTicksSinceParameterSave++;
 
 	switch (mode) {
 		case MODE_SEEK:
@@ -831,19 +840,21 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 	unsigned long updatedCounts;
 	updatedCounts = muldiv(scaledCounts, localTicks, apparentTicks);
 
-	Serial.print("\nUpdated counts: ");
+	// Adjust halfway between old and new. A form of low-pass filtering.
+  unsigned long filteredCounts = (updatedCounts + scaledCounts) >> 1;
+  
+  Serial.print("\nUpdated counts: ");
 	Serial.print(updatedCounts);
+  Serial.print("\nFiltered counts: ");
+  Serial.print(filteredCounts);	
 	Serial.print("\n  Difference: ");
 
-	long difference = updatedCounts - scaledCounts;
+	long difference = filteredCounts - scaledCounts;
 	Serial.print(difference);
-	Serial.print(" [");
-	Serial.print(difference, BIN);
-	Serial.print("]\n");
 
 	// Convert back to whole cycles and fraction.
-	tick_frac_numerator = updatedCounts % tick_frac_denominator;
-	tick_interval_cycles = updatedCounts / tick_frac_denominator;
+	tick_frac_numerator = filteredCounts % tick_frac_denominator;
+	tick_interval_cycles = filteredCounts / tick_frac_denominator;
 
 	tick_interval_changed = true;
 	unsaved_parameters = true;
@@ -927,7 +938,7 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 	uint8_t minutes = 0;
 	uint8_t hours = 0;
 	uint16_t daynum = 0;
-	uint8_t year = 2000;
+	uint16_t year = 2000;
 	bool leapYear = false;
 	
 	// Symbols are stored as '0' and '1' characters; LSB for 0 symbol is 0, and LSB for 1 symbol is 1.
