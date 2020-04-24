@@ -12,11 +12,14 @@ ns = {
 #for attr, value in ns.iteritems():
 #	tree.register_namespace(attr, value)
 
-tree.parse("filament_template.svg");
+tree.parse("month_template.svg");
 root = tree.getroot();
 
 filaments = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
 #filaments = [ "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" ]
+#filaments = [ "SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY" ]
+#filaments = [ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" ];
+
 # Find layer _ACTIVE_, keep a reference, and remove from document
 active = tree.find("svg:g[@inkscape:label='_ACTIVE_']", ns);
 if active is None:
@@ -33,7 +36,7 @@ root.remove(inactive);
 
 activeLayers = [];
 inactiveLayers = [];
-insertPos = 3;
+insertPos = 4;
 
 # Create active and inactive version of every layer.
 # Ensure layer is visible
@@ -62,3 +65,7 @@ for idx, fil in enumerate(filaments):
 	for l in layers:
 		root.remove(l)
 
+# Blank all filaments
+for l in inactiveLayers:
+	root.insert(insertPos, l)
+tree.write("month/blank.svg");

@@ -199,6 +199,9 @@ const uint32_t COLOR_PURPLE = pixels.Color(96,0,96);
 const uint32_t COLOR_PINK = pixels.Color(60, 0, 10);
 const uint32_t COLOR_FLASH = pixels.Color(255, 128, 128);
 
+const uint32_t COLOR_TOD_FIX = pixels.Color(7, 1, 0);
+const uint32_t COLOR_TOD_NOFIX = pixels.Color(4, 0, 4);
+
 // Six bytes of data for nixies
 volatile uint8_t nixieData[6];
 
@@ -415,7 +418,11 @@ void loop() {
 
 	if (tod_minuteChanged) {
 		if (tod_fix) {
-			tod_color = minuteColor(tod_hours, tod_minutes);
+			//tod_color = minuteColor(tod_hours, tod_minutes);
+			tod_color = COLOR_TOD_FIX;
+		}
+		else {
+			tod_color = COLOR_TOD_NOFIX;
 		}
 		tod_minuteChanged = false;
 	}
@@ -574,6 +581,9 @@ void updatePixels() {
 		if (tod_fix) {
 			// Get local time in AM/PM form
 			int8_t localHours = tod_hours + tzOffsetHours;
+			if (observeDst && tod_isdst) {
+				localHours++;
+			}
 			int8_t localMinutes = tod_minutes + tzOffsetMinutes;
 			if (localMinutes < 0) {
 				localMinutes += 60;
@@ -940,7 +950,8 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 	uint16_t daynum = 0;
 	uint16_t year = 2000;
 	bool leapYear = false;
-	
+	uint8_t dst = 0;
+
 	// Symbols are stored as '0' and '1' characters; LSB for 0 symbol is 0, and LSB for 1 symbol is 1.
 	if (symbolStream[1] & 0x01) minutes += 40;
 	if (symbolStream[2] & 0x01) minutes += 20;
@@ -979,6 +990,10 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 
 	if (symbolStream[55] & 0x01) leapYear = true;
 
+	// 2-bit DST code
+	if (symbolStream[57] & 0x01) dst = 2;
+	if (symbolStream[58] & 0x01) dst += 1;
+
  	// Update time of day. Decoded time is that at the start of the current frame transmission,
 	// so the current minute is one later. Seconds value is implicitly 0.
 	tod_ticks = ticksDelta;
@@ -987,6 +1002,7 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 	tod_hours = hours;
 	tod_day = daynum;
 	tod_year = year;
+	tod_isleapyear = leapYear;
 
 	// Adjust for overflow.
 	while (tod_ticks > 59) {
@@ -1014,6 +1030,29 @@ void decodeTimeOfDay(uint8_t ticksDelta) {
 			tod_day -= 365;
 			tod_year++;
 		}
+	}
+
+	// Daylight Saving Time in effect?
+	switch (dst) {
+		case 0:
+			// DST not in effect
+			tod_isdst = false;
+			break;
+
+		case 1:
+			// DST ends today. If local time is before 2:00AM, DST is in effect.
+			tod_isdst = (tod_hours + tzOffsetHours+1) < 2;
+			break;
+
+		case 2:
+			// DST begins today. If local time is at or after 2:00AM, DST is in effect.
+			tod_isdst = (tod_hours + tzOffsetHours) >= 2;
+			break;
+
+		case 3:
+			// DST in effect.
+			tod_isdst = true;
+			break;
 	}
 
 }
