@@ -120,6 +120,9 @@ const int PIN_WWVB = 7; // PORTD bit 7
 // Nixie tube register clock (RCK)
 const int PIN_RCK = 8;
 
+// Reflect WWVB input pin
+const int PIN_ECHO = 9; // PORTB bit 1
+
 // SPI pins for Nixie tube data and SRCK
 const int PIN_MOSI = 11;
 const int PIN_MISO = 12; // Unused
@@ -238,10 +241,10 @@ ScoreBoard scoreboard_marker = ScoreBoard();
 char symbolStream[60];
 
 // Current time of day, UTC
-volatile unsigned short tod_ticks = 0;
-volatile unsigned short tod_seconds = 0;
-volatile unsigned short tod_minutes = 0;
-volatile unsigned short tod_hours = 0;
+volatile uint8_t tod_ticks = 0;
+volatile uint8_t tod_seconds = 0;
+volatile uint8_t tod_minutes = 0;
+volatile uint8_t tod_hours = 0;
 volatile unsigned int tod_day = 0;
 volatile unsigned int tod_year = 0;
 volatile bool tod_isdst = false;
@@ -332,6 +335,7 @@ void setup() {
 
 	pinMode(PIN_PIXEL, OUTPUT);
 	pinMode(PIN_WWVB, INPUT);
+	pinMode(PIN_ECHO, OUTPUT);
 	pinMode(PIN_HEARTBEAT, OUTPUT);
 
 	pinMode(PIN_ROT_PB, INPUT);
@@ -389,8 +393,8 @@ void setup() {
 // as they change.
 // Time of day: Updates numeric display.
 // Tick interval period: Stores in EEPROM.
-// Operting mode: Write a message.
-// Rotary control: do things.
+// Operating mode: Write a message.
+// Rotary control: do the things.
 void loop() {
 	if (valid_frame_flag) {
 		valid_frame_flag = false;
@@ -480,7 +484,7 @@ void loop() {
 			saveParameters(0, &params);
 			bitSync_parametersSaved = true;
 			Serial.print("Saved parameters to EEPROM.\n");
-      bitSync_localTicksSinceParameterSave = 0;
+			bitSync_localTicksSinceParameterSave = 0;
 			unsaved_parameters = false;
 		}
 	}
@@ -503,7 +507,7 @@ void loop() {
 
 	if (rotary_cw) {
 		// Increase brightness
-		if (tube_pwm < 180) {
+		if (tube_pwm < 250) {
 			tube_pwm += 5;
 			setTubePwm(tube_pwm);
 		}
@@ -641,6 +645,15 @@ void tick() {
 	// Sample the input - port D bit 7
 	uint8_t input = (PIND & B10000000) >> 7;
 	//uint8_t input = fake_frame.nextBit();
+
+	// Echo sample to PIN_ECHO, PORTB bit 1
+	if (input) {
+		PORTB |= (1<<PORTB1);
+	}
+	else {
+		PORTB &= ~(1<<PORTB1);
+	}
+
 	shiftSample(input);
 
 	uint8_t score_ZERO = score(PATTERN_ZERO);
@@ -656,7 +669,7 @@ void tick() {
 
 	// Hoisted out of MODE_SYNC to keep sync count across all modes
 	bitSync_localTicksSinceSync++;
-  bitSync_localTicksSinceParameterSave++;
+	bitSync_localTicksSinceParameterSave++;
 
 	switch (mode) {
 		case MODE_SEEK:
@@ -851,12 +864,12 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 	updatedCounts = muldiv(scaledCounts, localTicks, apparentTicks);
 
 	// Adjust halfway between old and new. A form of low-pass filtering.
-  unsigned long filteredCounts = (updatedCounts + scaledCounts) >> 1;
-  
-  Serial.print("\nUpdated counts: ");
+	unsigned long filteredCounts = (updatedCounts + scaledCounts) >> 1;
+
+	Serial.print("\nUpdated counts: ");
 	Serial.print(updatedCounts);
-  Serial.print("\nFiltered counts: ");
-  Serial.print(filteredCounts);	
+	Serial.print("\nFiltered counts: ");
+	Serial.print(filteredCounts);	
 	Serial.print("\n  Difference: ");
 
 	long difference = filteredCounts - scaledCounts;
@@ -873,28 +886,28 @@ void adjustTickInterval(unsigned long localTicks, unsigned long apparentTicks) {
 // Computes (a*b)/c without overflow. Taken from https://stackoverflow.com/a/4144956. Based on
 // ancient Egyptian multiplication, https://en.wikipedia.org/wiki/Ancient_Egyptian_multiplication
 uint32_t muldiv(uint32_t a, uint32_t b, uint32_t c) {
-    uint32_t q = 0;              // the quotient
-    uint32_t r = 0;              // the remainder
-    uint32_t qn = b / c;
-    uint32_t rn = b % c;
-    while(a) {
-        if (a & 1) {
-            q += qn;
-            r += rn;
-            if (r >= c) {
-                q++;
-                r -= c;
-            }
-        }
-        a  >>= 1;
-        qn <<= 1;
-        rn <<= 1;
-        if (rn >= c) {
-            qn++; 
-            rn -= c;
-        }
-    }
-    return q;
+	uint32_t q = 0;              // the quotient
+	uint32_t r = 0;              // the remainder
+	uint32_t qn = b / c;
+	uint32_t rn = b % c;
+	while(a) {
+		if (a & 1) {
+			q += qn;
+			r += rn;
+			if (r >= c) {
+				q++;
+				r -= c;
+			}
+		}
+		a  >>= 1;
+		qn <<= 1;
+		rn <<= 1;
+		if (rn >= c) {
+			qn++; 
+			rn -= c;
+		}
+	}
+	return q;
 }
 
 void shiftSymbol(char newSymbol) {
@@ -1255,7 +1268,7 @@ void tickTime() {
 	tod_ticks = 0;
 	tod_seconds++;
 	
-	unsigned short minute_length = 60;
+	uint8_t minute_length = 60;
 	if (tod_isleapminute)
 		minute_length = 61;
 
@@ -1599,14 +1612,14 @@ uint16_t loadParameters(uint16_t address, PersistentParameters *params) {
 void configureTickTimer() {
 
 	// Configure timer 1 to interrupt at 60Hz
- 	OCR1A = tick_interval_cycles;
+	OCR1A = tick_interval_cycles;
 
 	TCCR1A = 0;
-    // Mode 4, CTC on OCR1A, prescaler 8
-    TCCR1B = (1 << WGM12) | (1 << CS11);
+	// Mode 4, CTC on OCR1A, prescaler 8
+	TCCR1B = (1 << WGM12) | (1 << CS11);
 
-    //Set interrupt on compare match
-    TIMSK1 |= (1 << OCIE1A);
+	//Set interrupt on compare match
+	TIMSK1 |= (1 << OCIE1A);
 }
 
 void configurePwmTimer() {
@@ -1653,72 +1666,72 @@ ISR (TIMER1_COMPA_vect) {
 // the encoder was rotated.
 ISR(PCINT1_vect)
 {
-  // Get current data
-  byte currentEncoderData = PINC & 0x07;
-  byte diff = currentEncoderData ^ lastEncoderData;
+	// Get current data
+	byte currentEncoderData = PINC & 0x07;
+	byte diff = currentEncoderData ^ lastEncoderData;
 
-  // Did pushbutton bit change?
-  if (diff & 0x01) {
-    // Up or down?
-    if (currentEncoderData & 0x01) {
+	// Did pushbutton bit change?
+	if (diff & 0x01) {
+		// Up or down?
+		if (currentEncoderData & 0x01) {
 		// Down
-    	//Serial.print('D');  // Down
+		//Serial.print('D');  // Down
 		rotary_down = true;
+		}
+		else {
+			// Up
+			rotary_released = true;
+		}
 	}
-    else {
-		// Up
-		rotary_released = true;
+
+	// Did rotary bits change?
+	if (diff & 0x06) {
+		// Read two quadrature bits and shift into register.  Keep prior two bits; mask off the rest
+		byte encBits = (PINC & 0x06) >> 1;
+		encoderDataRegister = ((encoderDataRegister << 2) | encBits ) & 0x0f;
+
+		// Figure out what happened.
+		switch (encoderDataRegister) {
+			// Clockwise cases:
+			case 0x01:  // 00 -> 01
+			case 0x07:  // 01 -> 11
+			case 0x0e:  // 11 -> 10
+			case 0x08:  // 10 -> 00
+			//Serial.print('>');
+			// Update value after complete quadrature cycle.
+			if ((encBits & 0x03) == 0) {
+				encoderValue++;
+				//Serial.print('[');
+				//Serial.print(encoderValue);
+				//Serial.print(']');
+				rotary_cw = true;
+			}
+			break;
+
+			// Counterclockwise cases:
+			case 0x0b:  // 10 -> 11
+			case 0x0d:  // 11 -> 01
+			case 0x04:  // 01 -> 00
+			case 0x02:  // 00 -> 10
+			//Serial.print('<');
+			// Update value after complete quadrature cycle.
+			if ((encBits & 0x03) == 0) {
+				encoderValue--;
+				//Serial.print('[');
+				//Serial.print(encoderValue);
+				//Serial.print(']');
+				rotary_ccw = true;
+			}
+			break;
+
+			// Other cases are invalid. Ignore.
+			default:
+			//Serial.print('-');
+			break;
+		} 
 	}
-  }
 
-  // Did rotary bits change?
-  if (diff & 0x06) {
-    // Read two quadrature bits and shift into register.  Keep prior two bits; mask off the rest
-    byte encBits = (PINC & 0x06) >> 1;
-    encoderDataRegister = ((encoderDataRegister << 2) | encBits ) & 0x0f;
-
-    // Figure out what happened.
-    switch (encoderDataRegister) {
-      // Clockwise cases:
-      case 0x01:  // 00 -> 01
-      case 0x07:  // 01 -> 11
-      case 0x0e:  // 11 -> 10
-      case 0x08:  // 10 -> 00
-        //Serial.print('>');
-		// Update value after complete quadrature cycle.
-        if ((encBits & 0x03) == 0) {
-			encoderValue++;
-			//Serial.print('[');
-			//Serial.print(encoderValue);
-			//Serial.print(']');
-			rotary_cw = true;
-        }
-        break;
-
-      // Counterclockwise cases:
-      case 0x0b:  // 10 -> 11
-      case 0x0d:  // 11 -> 01
-      case 0x04:  // 01 -> 00
-      case 0x02:  // 00 -> 10
-        //Serial.print('<');
-		// Update value after complete quadrature cycle.
-        if ((encBits & 0x03) == 0) {
-          encoderValue--;
-          //Serial.print('[');
-		  //Serial.print(encoderValue);
-		  //Serial.print(']');
-		  rotary_ccw = true;
-        }
-        break;
-
-      // Other cases are invalid. Ignore.
-      default:
-        //Serial.print('-');
-        break;
-    } 
-  }
-
-  lastEncoderData = currentEncoderData;
+	lastEncoderData = currentEncoderData;
 }
 
 
