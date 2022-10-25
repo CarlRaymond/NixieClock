@@ -1,8 +1,0 @@
-Active layer on <tspan>
-         style="font-size:30px;line-height:1.25;stroke:#d84f18;stroke-width:1.87500002;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1;stroke-linejoin:bevel"
-
-Lit layer on <text>
-       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:30px;line-height:125%;font-family:OrachTechDemo2Lttf;-inkscape-font-specification:'OrachTechDemo2Lttf, Normal';font-variant-ligatures:normal;font-variant-caps:normal;font-variant-numeric:normal;font-feature-settings:normal;text-align:center;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;text-anchor:middle;opacity:1;fill:none;fill-opacity:1;stroke:#d84f18;stroke-width:1.875;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-dashoffset:0;stroke-opacity:1;filter:url(#filter4424)"
-
-Unlit layer on <text>
-       style="font-style:normal;font-variant:normal;font-weight:normal;font-stretch:normal;font-size:30px;line-height:125%;font-family:OrachTechDemo2Lttf;-inkscape-font-specification:'OrachTechDemo2Lttf, Normal';text-align:center;letter-spacing:0px;word-spacing:0px;writing-mode:lr-tb;text-anchor:middle;fill:#545454;fill-opacity:1;stroke:none;stroke-width:2.5;stroke-linecap:butt;stroke-linejoin:round;stroke-miterlimit:4;stroke-dasharray:none;stroke-opacity:1"
